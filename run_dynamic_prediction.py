@@ -5,16 +5,12 @@ run_dynamic_prediction.py
 
 支持两种模式：
   demo    —— 使用合成数据，无需任何外部文件，立即可运行
-  real    —— 加载 D4RT .npz 输出文件进行真实预测
   droidw  —— 加载 DROID-W video.npz，从不确定性图提取动态点
 
 用法示例：
 
   # 合成数据演示
   python run_dynamic_prediction.py --mode demo --n_points 80 --n_frames 60
-
-  # D4RT 真实数据
-  python run_dynamic_prediction.py --mode real --d4rt_path /path/to/d4rt_output.npz
 
   # DROID-W 后处理
   python run_dynamic_prediction.py --mode droidw --video_npz /path/to/video.npz
@@ -213,32 +209,6 @@ def run_demo(args) -> None:
     print("[Demo] 完成。")
 
 
-# ---------------------------------------------------------------------------
-# Real 模式（D4RT .npz）
-# ---------------------------------------------------------------------------
-
-def run_real(args) -> None:
-    from dynamic_prediction.d4rt_bridge import D4RTLoader
-    from dynamic_prediction.sliding_window import SlidingWindowPredictor
-
-    print(f"[Real] 加载 D4RT 数据：{args.d4rt_path}")
-    data = D4RTLoader.load(args.d4rt_path)
-    frames, pids_list = D4RTLoader.to_frame_sequence(data, visible_only=True)
-
-    print(f"[Real] 共 {len(frames)} 帧，每帧约 {np.mean([len(f) for f in frames]):.0f} 个可见点")
-
-    predictor = SlidingWindowPredictor(
-        window_size=args.window_size,
-        predict_steps=args.predict_steps,
-    )
-    visualizer = _make_visualizer(args)
-
-    run_prediction_loop(frames, pids_list, None, predictor, visualizer, args)
-
-    if visualizer is not None:
-        visualizer.destroy()
-    print("[Real] 完成。")
-
 
 # ---------------------------------------------------------------------------
 # DROID-W 模式（video.npz）
@@ -261,7 +231,8 @@ def run_droidw(args) -> None:
     )
     visualizer = _make_visualizer(args)
 
-    run_prediction_loop(frames, pids_list, None, predictor, visualizer, args)
+    # frames 本身即为真值（预测第 t+1 帧，真值为第 t+1 帧的实际观测）
+    run_prediction_loop(frames, pids_list, frames, predictor, visualizer, args)
 
     if visualizer is not None:
         visualizer.destroy()
@@ -274,11 +245,11 @@ def run_droidw(args) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="动态点运动预测系统（D4RT + Kalman Filter）",
+        description="动态点运动预测系统（DROID-W + Kalman Filter）",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
-        "--mode", choices=["demo", "real", "droidw"], default="demo",
+        "--mode", choices=["demo", "droidw"], default="demo",
         help="运行模式"
     )
 
@@ -289,16 +260,12 @@ def parse_args() -> argparse.Namespace:
     demo_group.add_argument("--n_frames", type=int, default=60,
                             help="合成帧数")
 
-    # Real 参数
-    real_group = parser.add_argument_group("Real 模式参数（D4RT）")
-    real_group.add_argument("--d4rt_path", type=str, default=None,
-                            help="D4RT 输出 .npz 文件路径")
 
     # DROID-W 参数
     dw_group = parser.add_argument_group("DROID-W 模式参数")
     dw_group.add_argument("--video_npz", type=str, default=None,
                           help="DROID-W 保存的 video.npz 路径")
-    dw_group.add_argument("--uncer_thresh", type=float, default=2.0,
+    dw_group.add_argument("--uncer_thresh", type=float, default=0.8,
                           help="不确定性阈值（高于此值视为动态点）")
 
     # 通用参数
@@ -322,7 +289,7 @@ if __name__ == "__main__":
     args = parse_args()
 
     print("=" * 50)
-    print("  动态点预测系统  (D4RT + Kalman Filter)")
+    print("  动态点预测系统  (DROID-W + Kalman Filter)")
     print("=" * 50)
     print(f"  模式         : {args.mode}")
     print(f"  窗口大小     : {args.window_size}")
@@ -332,10 +299,6 @@ if __name__ == "__main__":
 
     if args.mode == "demo":
         run_demo(args)
-    elif args.mode == "real":
-        if args.d4rt_path is None:
-            raise ValueError("--mode real 需要提供 --d4rt_path")
-        run_real(args)
     elif args.mode == "droidw":
         if args.video_npz is None:
             raise ValueError("--mode droidw 需要提供 --video_npz")

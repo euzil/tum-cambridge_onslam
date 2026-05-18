@@ -6,21 +6,21 @@ from collections import OrderedDict
 import torch.multiprocessing as mp
 from munch import munchify
 
-from src_v1.modules.droid_net import DroidNet
-from src_v1.depth_video import DepthVideo
-from src_v1.trajectory_filler import PoseTrajectoryFiller
-from src_v1.utils.common import setup_seed, update_cam
-from src_v1.utils.Printer import Printer, FontColor
-from src_v1.utils.eval_traj import kf_traj_eval, full_traj_eval, full_traj_fill
-from src_v1.utils.datasets import BaseDataset
-from src_v1.tracker import Tracker
-from src_v1.mapper import Mapper
-from src_v1.backend import Backend
-from src_v1.utils.datasets import RGB_NoPose
-from src_v1.gui import gui_utils, slam_gui
+from src.modules.droid_net import DroidNet
+from src.depth_video import DepthVideo
+from src.trajectory_filler import PoseTrajectoryFiller
+from src.utils.common import setup_seed, update_cam
+from src.utils.Printer import Printer, FontColor
+from src.utils.eval_traj import kf_traj_eval, full_traj_eval, full_traj_fill
+from src.utils.datasets import BaseDataset
+from src.tracker import Tracker
+from src.mapper import Mapper
+from src.backend import Backend
+from src.utils.datasets import RGB_NoPose
+from src.gui import gui_utils, slam_gui
 from thirdparty.gaussian_splatting.scene.gaussian_model import GaussianModel
 from torch.utils.tensorboard import SummaryWriter
-from src_v1.utils.sys_timer import timer
+from src.utils.sys_timer import timer
 import ctypes
 
 class SLAM:
@@ -238,11 +238,10 @@ class SLAM:
     def run_dynamic_prediction(self) -> None:
         """
         在 SLAM 完成后运行动态点运动预测。
-        需要 cfg['dynamic_prediction']['enable'] = True，
-        以及已保存的 video.npz 中包含 uncertainties 字段。
+        需要 cfg['dynamic_prediction']['enable'] = True。
         """
         try:
-            from src_v1.dynamic_bridge import DynamicBridge
+            from src.dynamic_bridge import DynamicBridge
         except ImportError:
             self.printer.print(
                 "dynamic_bridge 模块未找到，跳过动态预测。",
@@ -259,17 +258,11 @@ class SLAM:
             save_dir=self.save_dir,
             window_size=dp_cfg.get("window_size", 8),
             predict_steps=dp_cfg.get("predict_steps", 2),
-            uncer_thresh=dp_cfg.get("uncer_thresh", 2.0),
-            enable_vis=dp_cfg.get("enable_vis", True),
+            uncer_thresh=dp_cfg.get("uncer_thresh", 0.8),
+            enable_vis=dp_cfg.get("enable_vis", False),
             fps=dp_cfg.get("fps", 10.0),
         )
-
-        d4rt_path = dp_cfg.get("d4rt_path", None)
-        if d4rt_path is not None and os.path.exists(d4rt_path):
-            bridge.run_from_d4rt(d4rt_path)
-        else:
-            bridge.run_from_video_npz(video_npz)
-
+        bridge.run_from_video_npz(video_npz)
         self.printer.print("Dynamic prediction done.", FontColor.INFO)
 
     def _eval_depth_all(self, ate_statistics, global_scale, r_a, t_a):
@@ -361,7 +354,7 @@ class SLAM:
 
         # visualizer
         if self.cfg['droidvis']:
-            from src_v1.utils.droid_visualization_rerun import droid_visualization_rerun
+            from src.utils.droid_visualization_rerun import droid_visualization_rerun
             self.visualizer = mp.Process(
                 target=droid_visualization_rerun,
                 args=(self.video,),

@@ -1,14 +1,14 @@
-from src_v1.motion_filter import MotionFilter
-from src_v1.frontend import Frontend 
-from src_v1.backend import Backend
+from src.motion_filter import MotionFilter
+from src.frontend import Frontend 
+from src.backend import Backend
 import torch
 from colorama import Fore, Style
 from multiprocessing.connection import Connection
-from src_v1.utils.datasets import BaseDataset
-from src_v1.utils.Printer import Printer,FontColor
-from src_v1.utils.datasets import RGB_NoPose
-from src_v1.utils.eval_traj import kf_traj_eval, full_traj_eval
-from src_v1.utils.sys_timer import timer
+from src.utils.datasets import BaseDataset
+from src.utils.Printer import Printer,FontColor
+from src.utils.datasets import RGB_NoPose
+from src.utils.eval_traj import kf_traj_eval, full_traj_eval
+from src.utils.sys_timer import timer
 import os
 from torch.utils.tensorboard import SummaryWriter
 
@@ -40,6 +40,16 @@ class Tracker:
 
         # write the config to the event writer
         self.event_writer.add_text("config", str(self.cfg))
+
+        # 在线动态预测器
+        self._online_dyn_pred = None
+        dp_cfg = self.cfg.get("dynamic_prediction", {})
+        if dp_cfg.get("enable", False):
+            from src.dynamic_bridge import OnlineDynamicPredictor
+            self._online_dyn_pred = OnlineDynamicPredictor(
+                cfg=self.cfg,
+                save_dir=self.output,
+            )
 
     def run(self, stream:BaseDataset):
         '''
@@ -136,11 +146,20 @@ class Tracker:
                                         "end":False})
                         self.pipe.recv()
 
+            # 在线动态预测：新关键帧产生时更新
+            if curr_kf_idx != prev_kf_idx and self.frontend.is_initialized:
+                if self._online_dyn_pred is not None:
+                    self._online_dyn_pred.update(self.video, curr_kf_idx)
+
             prev_kf_idx = curr_kf_idx
             self.printer.update_pbar()
 
         self.pipe.send({"is_keyframe":True, "video_idx":None,
                         "timestamp":None, "just_initialized": False, 
                         "end":True})
+
+        # 合成在线预测 GIF
+        if self._online_dyn_pred is not None:
+            self._online_dyn_pred.finalize()
 
                 

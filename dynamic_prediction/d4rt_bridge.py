@@ -127,98 +127,158 @@ class DROIDWBridge:
     若 D4RT 提供了带 ID 的轨迹，优先使用 D4RTLoader。
     """
 
-    def __init__(self, uncer_thresh: float = 2.0) -> None:
+    def __init__(self, uncer_thresh: float = 0.8, match_radius: float = 0.3) -> None:
         self.uncer_thresh = uncer_thresh
+        self.match_radius = match_radius  # 跨帧匹配半径（米）
 
     def load(self, video_npz_path: str) -> Dict:
         """
         加载 video.npz，返回原始数据字典。
+        兼容 DROID-W 实际输出格式：
+          poses=[T,4,4] 旋转矩阵 或 [T,7] 四元数
+          droid_disps=[T,H,W]，timestamps=[T]
         """
         if not os.path.exists(video_npz_path):
             raise FileNotFoundError(f"video.npz 不存在：{video_npz_path}")
 
         data = np.load(video_npz_path, allow_pickle=True)
-        result = {
-            "poses": np.asarray(data["poses"]),          # [T, 7] 四元数 SE3
-            "disps": np.asarray(data["disps"]),          # [T, H, W] 逆深度
-            "tstamps": np.asarray(data["tstamps"]),      # [T]
-            "intrinsics": np.asarray(data["intrinsics"]),  # [T, 4]
-            "uncertainties": (
-                np.asarray(data["uncertainties"])
-                if "uncertainties" in data else None
-            ),                                           # [T, H, W] | None
+
+        poses_raw = np.asarray(data["poses"])  # [T,4,4] 或 [T,7]
+
+        # disps: 优先使用与 uncertainties 尺寸一致的低分辨率版本
+        if "droid_disps" in data:
+            disps = np.asarray(data["droid_disps"])
+        elif "disps" in data:
+            disps = np.asarray(data["disps"])
+        else:
+            raise KeyError("video.npz 中找不到视差图字段（droid_disps / disps）")
+
+        # timestamps: 兼容两种字段名
+        if "timestamps" in data:
+            tstamps = np.asarray(data["timestamps"])
+        elif "tstamps" in data:
+            tstamps = np.asarray(data["tstamps"])
+        else:
+            tstamps = np.arange(poses_raw.shape[0], dtype=np.float32)
+
+        intrinsics = np.asarray(data["intrinsics"])
+        uncertainties = (
+            np.asarray(data["uncertainties"])
+            if "uncertainties" in data else None
+        )
+
+        return {
+            "poses": poses_raw,
+            "disps": disps,
+            "tstamps": tstamps,
+            "intrinsics": intrinsics,
+            "uncertainties": uncertainties,
         }
-        return result
 
     def extract_dynamic_points(self, droidw_data: Dict) -> Tuple[list, list]:
         """
-        从 DROID-W 数据中提取每帧的动态点云。
+        从 DROID-W 数据中提取每帧的动态点云，并进行跨帧最近邻 ID 匹配。
 
         Returns
         -------
         frames      : list of np.ndarray [N_t, 3]（世界坐标）
-        point_ids   : list of np.ndarray [N_t]
-                      注意：不同帧之间 ID 无跨帧意义（无 D4RT 匹配）
+        point_ids   : list of np.ndarray [N_t]（跨帧一致的物理点 ID）
         """
-        poses = droidw_data["poses"]              # [T, 7]
-        disps = droidw_data["disps"]              # [T, H, W]
-        intrinsics = droidw_data["intrinsics"]    # [T, 4]
-        uncertainties = droidw_data["uncertainties"]  # [T, H, W] | None
+        poses = droidw_data["poses"]
+        disps = droidw_data["disps"]
+        intrinsics = droidw_data["intrinsics"]
+        uncertainties = droidw_data["uncertainties"]
 
         T, H, W = disps.shape
+        raw_frames: list = []
 
-        frames: list = []
-        point_ids_list: list = []
-
+        # --- 第一步：提取每帧原始点云 ---
         for t in range(T):
             fx, fy, cx, cy = intrinsics[t]
 
-            # 像素网格（与 1/8 分辨率对应）
             v_grid, u_grid = np.meshgrid(
                 np.arange(H, dtype=float),
                 np.arange(W, dtype=float),
                 indexing="ij",
-            )  # [H, W]
+            )
 
-            disp_t = disps[t]                    # [H, W]
-            depth_t = np.where(disp_t > 1e-6, 1.0 / disp_t, 0.0)  # [H, W]
+            disp_t = disps[t]
+            depth_t = np.where(disp_t > 1e-6, 1.0 / disp_t, 0.0)
 
-            # 选择动态像素
             if uncertainties is not None:
                 dyn_mask = uncertainties[t] > self.uncer_thresh
             else:
-                # 无不确定性图时使用全部点
                 dyn_mask = depth_t > 0.0
 
-            dyn_mask &= depth_t > 0.0  # 排除无效深度
+            dyn_mask &= depth_t > 0.0
 
             if dyn_mask.sum() == 0:
-                frames.append(np.zeros((0, 3)))
+                raw_frames.append(np.zeros((0, 3)))
+                continue
+
+            u = u_grid[dyn_mask]
+            v = v_grid[dyn_mask]
+            d = depth_t[dyn_mask]
+
+            pts_cam = np.stack([
+                (u - cx) / fx * d,
+                (v - cy) / fy * d,
+                d,
+            ], axis=-1)
+
+            pts_world = self._cam_to_world(pts_cam, poses[t])
+            raw_frames.append(pts_world)
+
+        # --- 第二步：跨帧最近邻 ID 匹配 ---
+        return self._assign_consistent_ids(raw_frames)
+
+    def _assign_consistent_ids(self, raw_frames: list) -> Tuple[list, list]:
+        """
+        对每帧点云用最近邻匹配赋予跨帧一致的全局 ID。
+
+        策略：
+            - 第 0 帧：所有点直接分配新 ID
+            - 后续帧：每个点找上一帧最近的点
+              · 距离 < match_radius  → 继承该点 ID（同一物理点）
+              · 距离 >= match_radius → 分配新 ID（新出现的动态点）
+        """
+        point_ids_list: list = []
+        next_id: int = 0
+        prev_pts: np.ndarray = None
+        prev_ids: np.ndarray = None
+
+        for pts in raw_frames:
+            N = pts.shape[0]
+            if N == 0:
                 point_ids_list.append(np.zeros(0, dtype=int))
                 continue
 
-            # 反投影至相机坐标系
-            u = u_grid[dyn_mask]           # [N]
-            v = v_grid[dyn_mask]           # [N]
-            d = depth_t[dyn_mask]          # [N]
+            if prev_pts is None or prev_pts.shape[0] == 0:
+                ids = np.arange(next_id, next_id + N, dtype=int)
+                next_id += N
+            else:
+                ids = np.full(N, -1, dtype=int)
 
-            X_cam = (u - cx) / fx * d     # [N]
-            Y_cam = (v - cy) / fy * d     # [N]
-            Z_cam = d                      # [N]
+                # 距离矩阵 [N, M]
+                diff = pts[:, None, :] - prev_pts[None, :, :]
+                dist = np.linalg.norm(diff, axis=-1)
 
-            pts_cam = np.stack([X_cam, Y_cam, Z_cam], axis=-1)  # [N, 3]
+                nearest_idx = dist.argmin(axis=1)
+                nearest_dist = dist[np.arange(N), nearest_idx]
 
-            # 位姿 [tx, ty, tz, qx, qy, qz, qw]（world-to-camera）
-            # 构建 T_wc（camera-to-world）= T_cw^{-1}
-            pts_world = self._cam_to_world(pts_cam, poses[t])   # [N, 3]
+                matched = nearest_dist < self.match_radius
+                ids[matched] = prev_ids[nearest_idx[matched]]
 
-            # 简单随机 ID（跨帧无法匹配）
-            pids = np.arange(pts_world.shape[0], dtype=int)
+                n_new = (~matched).sum()
+                if n_new > 0:
+                    ids[~matched] = np.arange(next_id, next_id + n_new, dtype=int)
+                    next_id += n_new
 
-            frames.append(pts_world)
-            point_ids_list.append(pids)
+            point_ids_list.append(ids)
+            prev_pts = pts
+            prev_ids = ids
 
-        return frames, point_ids_list
+        return raw_frames, point_ids_list
 
     @staticmethod
     def _cam_to_world(
@@ -228,19 +288,21 @@ class DROIDWBridge:
         """
         将相机坐标系下的点转换到世界坐标系。
 
-        pose_cw : [7]  [tx, ty, tz, qx, qy, qz, qw]（world-to-camera）
+        pose_cw : [4, 4] world-to-camera 变换矩阵
+                  或 [7]  [tx, ty, tz, qx, qy, qz, qw]（world-to-camera）
         返回 [N, 3]
         """
-        t = pose_cw[:3]                            # [3]
-        qx, qy, qz, qw = pose_cw[3], pose_cw[4], pose_cw[5], pose_cw[6]
+        if pose_cw.shape == (4, 4):
+            R_cw = pose_cw[:3, :3]
+            t_cw = pose_cw[:3, 3]
+        else:
+            # [7]: tx, ty, tz, qx, qy, qz, qw
+            t_cw = pose_cw[:3]
+            qx, qy, qz, qw = pose_cw[3], pose_cw[4], pose_cw[5], pose_cw[6]
+            R_cw = DROIDWBridge._quat_to_rot(qx, qy, qz, qw)
 
-        # 四元数转旋转矩阵 R_cw（world-to-camera）
-        R_cw = DROIDWBridge._quat_to_rot(qx, qy, qz, qw)  # [3, 3]
-
-        # T_cw: X_cam = R_cw @ X_world + t
-        # → X_world = R_cw^T @ (X_cam - t)
-        R_wc = R_cw.T
-        pts_world = (R_wc @ (pts_cam - t[None, :]).T).T     # [N, 3]
+        # X_world = R_cw^T @ (X_cam - t_cw)
+        pts_world = (R_cw.T @ (pts_cam - t_cw[None, :]).T).T
         return pts_world
 
     @staticmethod

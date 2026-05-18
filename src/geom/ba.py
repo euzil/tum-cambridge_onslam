@@ -16,7 +16,7 @@ import lietorch
 import torch
 import torch.nn.functional as F
 from .chol import block_solve, schur_solve
-import src_v1.geom.projective_ops as pops
+import src.geom.projective_ops as pops
 
 from torch_scatter import scatter_sum
 

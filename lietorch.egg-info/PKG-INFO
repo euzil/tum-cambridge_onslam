@@ -1,0 +1,6 @@
+Metadata-Version: 2.1
+Name: lietorch
+Version: 0.2
+Summary: Lie Groups for PyTorch
+Author: teedrz
+License-File: LICENSE

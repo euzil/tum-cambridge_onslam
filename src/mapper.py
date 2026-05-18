@@ -30,21 +30,21 @@ from thirdparty.gaussian_splatting.utils.graphics_utils import (
     getProjectionMatrix2,
     getWorld2View2,
 )
-from src_v1.depth_video import DepthVideo
-from src_v1.utils.datasets import get_dataset, load_metric_depth, load_img_feature
-from src_v1.utils.common import as_intrinsics_matrix, setup_seed
-from src_v1.utils.Printer import Printer, FontColor
-from src_v1.utils.pose_utils import update_pose
-from src_v1.utils.slam_utils import (
+from src.depth_video import DepthVideo
+from src.utils.datasets import get_dataset, load_metric_depth, load_img_feature
+from src.utils.common import as_intrinsics_matrix, setup_seed
+from src.utils.Printer import Printer, FontColor
+from src.utils.pose_utils import update_pose
+from src.utils.slam_utils import (
     get_loss_mapping,
     get_loss_mapping_uncertainty,
     get_loss_tracking,
 )
-from src_v1.utils.camera_utils import Camera
-from src_v1.utils.dyn_uncertainty import mapping_utils as map_utils
-from src_v1.utils.dyn_uncertainty.median_filter import MedianPool2d
-from src_v1.utils.plot_utils import create_gif_from_directory
-from src_v1.gui import gui_utils
+from src.utils.camera_utils import Camera
+from src.utils.dyn_uncertainty import mapping_utils as map_utils
+from src.utils.dyn_uncertainty.median_filter import MedianPool2d
+from src.utils.plot_utils import create_gif_from_directory
+from src.gui import gui_utils
 from PIL import Image
 import matplotlib.pyplot as plt
 from matplotlib import cm

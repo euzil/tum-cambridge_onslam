@@ -2,20 +2,20 @@ import numpy as np
 import torch
 import lietorch
 import droid_backends
-import src_v1.geom.ba
+import src.geom.ba
 from torch.multiprocessing import Value
 from torch.multiprocessing import Lock
 import torch.nn.functional as F
 
-from src_v1.modules.droid_net import cvx_upsample
-import src_v1.geom.projective_ops as pops
-from src_v1.utils.common import align_scale_and_shift
-from src_v1.utils.Printer import FontColor
-from src_v1.utils.dyn_uncertainty import mapping_utils as map_utils
-from src_v1.utils.plot_utils import create_gif_from_directory
+from src.modules.droid_net import cvx_upsample
+import src.geom.projective_ops as pops
+from src.utils.common import align_scale_and_shift
+from src.utils.Printer import FontColor
+from src.utils.dyn_uncertainty import mapping_utils as map_utils
+from src.utils.plot_utils import create_gif_from_directory
 import matplotlib.pyplot as plt
 import os
-from src_v1.utils.sys_timer import timer
+from src.utils.sys_timer import timer
 import PIL
 import PIL.Image as Image
 from sklearn.decomposition import PCA

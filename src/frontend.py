@@ -1,6 +1,6 @@
 import torch
-from src_v1.factor_graph import FactorGraph
-from src_v1.backend import Backend as LoopClosing
+from src.factor_graph import FactorGraph
+from src.backend import Backend as LoopClosing
 from torch.utils.tensorboard import SummaryWriter
 
 class Frontend:

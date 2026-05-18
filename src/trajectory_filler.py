@@ -1,11 +1,11 @@
 import torch
 import lietorch
 from lietorch import SE3
-from src_v1.factor_graph import FactorGraph
+from src.factor_graph import FactorGraph
 from tqdm import tqdm
-from src_v1.utils.datasets import BaseDataset
-from src_v1.utils.Printer import FontColor
-from src_v1.utils.mono_priors.img_feature_extractors import predict_img_features, get_feature_extractor
+from src.utils.datasets import BaseDataset
+from src.utils.Printer import FontColor
+from src.utils.mono_priors.img_feature_extractors import predict_img_features, get_feature_extractor
 
 class PoseTrajectoryFiller:
     """ This class is used to fill in non-keyframe poses 

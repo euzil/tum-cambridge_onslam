@@ -23,9 +23,9 @@ rule cuda_compile
 
 
 
-build /home/youran/文档/DROID-W/thirdparty/simple-knn/build/temp.linux-x86_64-cpython-310/ext.o: compile /home/youran/文档/DROID-W/thirdparty/simple-knn/ext.cpp
-build /home/youran/文档/DROID-W/thirdparty/simple-knn/build/temp.linux-x86_64-cpython-310/simple_knn.o: cuda_compile /home/youran/文档/DROID-W/thirdparty/simple-knn/simple_knn.cu
-build /home/youran/文档/DROID-W/thirdparty/simple-knn/build/temp.linux-x86_64-cpython-310/spatial.o: cuda_compile /home/youran/文档/DROID-W/thirdparty/simple-knn/spatial.cu
+build /home/youran/文档/DROID-W/TUM-Cambridge_onSLAM/thirdparty/simple-knn/build/temp.linux-x86_64-cpython-310/ext.o: compile /home/youran/文档/DROID-W/TUM-Cambridge_onSLAM/thirdparty/simple-knn/ext.cpp
+build /home/youran/文档/DROID-W/TUM-Cambridge_onSLAM/thirdparty/simple-knn/build/temp.linux-x86_64-cpython-310/simple_knn.o: cuda_compile /home/youran/文档/DROID-W/TUM-Cambridge_onSLAM/thirdparty/simple-knn/simple_knn.cu
+build /home/youran/文档/DROID-W/TUM-Cambridge_onSLAM/thirdparty/simple-knn/build/temp.linux-x86_64-cpython-310/spatial.o: cuda_compile /home/youran/文档/DROID-W/TUM-Cambridge_onSLAM/thirdparty/simple-knn/spatial.cu
 
 
 

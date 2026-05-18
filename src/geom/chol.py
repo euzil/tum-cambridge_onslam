@@ -14,7 +14,7 @@
 
 import torch
 import torch.nn.functional as F
-import src_v1.geom.projective_ops as pops
+import src.geom.projective_ops as pops
 
 # class CholeskySolver(torch.autograd.Function):
 class CholeskySolver():

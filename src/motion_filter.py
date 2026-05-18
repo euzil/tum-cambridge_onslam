@@ -1,11 +1,11 @@
 import torch
 import lietorch
 
-import src_v1.geom.projective_ops as pops
-from src_v1.modules.droid_net import CorrBlock
-from src_v1.utils.mono_priors.metric_depth_estimators import get_metric_depth_estimator, predict_metric_depth
-from src_v1.utils.datasets import load_metric_depth, load_img_feature
-from src_v1.utils.mono_priors.img_feature_extractors import predict_img_features, get_feature_extractor
+import src.geom.projective_ops as pops
+from src.modules.droid_net import CorrBlock
+from src.utils.mono_priors.metric_depth_estimators import get_metric_depth_estimator, predict_metric_depth
+from src.utils.datasets import load_metric_depth, load_img_feature
+from src.utils.mono_priors.img_feature_extractors import predict_img_features, get_feature_extractor
 
 class MotionFilter:
     """ This class is used to filter incoming frames and extract features 

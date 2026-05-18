@@ -1,8 +1,8 @@
 import torch
 import numpy as np
 
-from src_v1.modules.droid_net import CorrBlock, AltCorrBlock
-import src_v1.geom.projective_ops as pops
+from src.modules.droid_net import CorrBlock, AltCorrBlock
+import src.geom.projective_ops as pops
 from copy import deepcopy
 
 

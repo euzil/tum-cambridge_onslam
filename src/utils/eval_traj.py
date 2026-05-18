@@ -10,10 +10,10 @@
 import numpy as np
 import torch
 from lietorch import SE3
-from src_v1.utils.Printer import FontColor
+from src.utils.Printer import FontColor
 from scipy.spatial.transform import Rotation
 from tqdm import tqdm
-from src_v1.utils.datasets import RGB_NoPose
+from src.utils.datasets import RGB_NoPose
 
 def align_kf_traj(npz_path,stream,return_full_est_traj=False,printer=None):
     offline_video = dict(np.load(npz_path))

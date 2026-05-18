@@ -164,7 +164,7 @@ data:
 # 在 SLAM terminate() 完成后自动运行
 # ============================================================
 dynamic_prediction:
-  enable: False             # 设为 True 以启用动态预测流程
+  enable: True             # 设为 True 以启用动态预测流程
 
   # 滑动窗口参数
   window_size: 8            # 使用过去多少关键帧进行预测
@@ -175,14 +175,11 @@ dynamic_prediction:
   measurement_noise: 1.0    # 测量噪声（越大越平滑）
 
   # 动态点提取参数
-  uncer_thresh: 2.0         # 不确定性阈值（高于此值视为动态点）
-
-  # D4RT 集成（可选）
-  # 若指定此路径，将使用 D4RT 输出替代 DROID-W 不确定性图
-  d4rt_path: null           # /path/to/d4rt_output.npz
+  uncer_thresh: 0.8         # 不确定性阈值（离线版，全局BA后使用）
+  online_uncer_thresh: 0.8  # 不确定性阈值（在线版，局部BA后使用，affine_weights未充分收敛）
 
   # 可视化参数
-  enable_vis: True          # 是否启用 Open3D 实时可视化
+  enable_vis: False         # 是否启用 Open3D 实时可视化
   fps: 10.0                 # 可视化帧率（0=不限速）
   input_folder: Please_specify_the_path_to_the_dataset
 
