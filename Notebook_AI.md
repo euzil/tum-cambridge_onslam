@@ -438,3 +438,83 @@ D4RT 输出的 `.npz` 文件应包含以下字段：
 | 动态点处理 | ❌ 丢弃 | ⚠️ 降权 | ✅ 理解 |
 | 物体轨迹 | ❌ | ❌ | ✅ |
 | 行为预测 | ❌ | ❌ | ✅ |
+
+---
+
+## 十二、实现记录（2026-05-18）
+
+### 当前实现总结
+
+根据本笔记的系统设计，已将文档描述转化为可运行代码。
+
+#### 新增文件结构
+
+```
+dynamic_prediction/
+├── __init__.py           # 模块入口，导出核心类
+├── point_predictor.py    # ConstantVelocityPredictor + KalmanPointPredictor
+├── sliding_window.py     # SlidingWindowPredictor 滑动窗口管理器
+├── visualizer_4d.py      # Open3D 实时可视化（附 Matplotlib 后备）
+├── d4rt_bridge.py        # D4RTLoader / DROIDWBridge / SyntheticDataGenerator
+└── evaluator.py          # ADE / FDE 评估工具
+
+src/
+└── dynamic_bridge.py     # DROID-W ↔ dynamic_prediction 集成桥接层
+
+run_dynamic_prediction.py # 主运行脚本（demo / real / droidw 三种模式）
+```
+
+#### 对现有代码的修改
+
+| 文件 | 修改内容 |
+|---|---|
+| `src/slam.py` | `terminate()` 末尾添加动态预测钩子；新增 `run_dynamic_prediction()` 方法 |
+| `configs/droid_w.yaml` | 新增 `dynamic_prediction:` 配置段（默认 `enable: False`） |
+| `requirements.txt` | 新增 `filterpy>=1.4.5` |
+
+#### 数据流
+
+```
+DROID-W video.npz（poses + disps + uncertainties）
+        ↓
+DROIDWBridge.extract_dynamic_points()   ← 高不确定性像素反投影至世界坐标
+        ↓ per-frame [N, 3] 点云
+SlidingWindowPredictor.add_frame()      ← 逐帧喂入，维护 Kalman Filter
+        ↓ 窗口满后
+predictor.predict()                     ← 输出未来 1-2 帧预测位置
+        ↓
+Visualizer4D.update()                   ← 白/蓝/红 三层可视化
+```
+
+#### 立即可运行
+
+```bash
+pip install filterpy
+python run_dynamic_prediction.py --mode demo --n_points 80 --n_frames 60
+```
+
+---
+
+### 为什么不需要训练模型
+
+**Kalman Filter 没有参数需要学习**，它是一个纯数学滤波器。
+
+每来一个新观测值，立即更新状态估计：
+
+$$\hat{x}_{t|t} = \hat{x}_{t|t-1} + K_t(z_t - H\hat{x}_{t|t-1})$$
+
+不需要"历史数据集"来学习运动规律。只需在初始化时确定：
+- 运动模型（匀速：$F$ 矩阵写死）
+- 过程噪声 $Q$ 和测量噪声 $R$（手设超参数）
+
+**没有任何权重需要梯度下降优化。**
+
+#### 三种预测方案对比（训练需求）
+
+| 方案 | 需要训练？ | 原因 |
+|---|---|---|
+| 匀速模型 | ❌ | 纯几何计算，求均值速度 |
+| Kalman Filter（当前实现） | ❌ | 数学滤波器，参数是手设超参数 |
+| LSTM（Week 4 升级方向） | ✅ 需要 | 神经网络，需要标注轨迹数据训练 |
+
+Kalman Filter 被选为 MVP 的核心理由：**零训练成本，开箱即用，在线实时更新。**

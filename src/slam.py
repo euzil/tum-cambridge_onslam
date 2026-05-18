@@ -228,7 +228,49 @@ class SLAM:
 
         self.printer.print("Metrics Evaluation Done!", FontColor.EVAL)
         timer._report_summary(self.save_dir)
+
+        # ---- 动态点预测（可选，通过 cfg['dynamic_prediction']['enable'] 控制）----
+        if self.cfg.get("dynamic_prediction", {}).get("enable", False):
+            self.run_dynamic_prediction()
+
         self.final_clean = True
+
+    def run_dynamic_prediction(self) -> None:
+        """
+        在 SLAM 完成后运行动态点运动预测。
+        需要 cfg['dynamic_prediction']['enable'] = True，
+        以及已保存的 video.npz 中包含 uncertainties 字段。
+        """
+        try:
+            from src_v1.dynamic_bridge import DynamicBridge
+        except ImportError:
+            self.printer.print(
+                "dynamic_bridge 模块未找到，跳过动态预测。",
+                FontColor.INFO,
+            )
+            return
+
+        dp_cfg = self.cfg.get("dynamic_prediction", {})
+        video_npz = f"{self.save_dir}/video.npz"
+
+        self.printer.print("Running dynamic point prediction ...", FontColor.INFO)
+        bridge = DynamicBridge(
+            cfg=self.cfg,
+            save_dir=self.save_dir,
+            window_size=dp_cfg.get("window_size", 8),
+            predict_steps=dp_cfg.get("predict_steps", 2),
+            uncer_thresh=dp_cfg.get("uncer_thresh", 2.0),
+            enable_vis=dp_cfg.get("enable_vis", True),
+            fps=dp_cfg.get("fps", 10.0),
+        )
+
+        d4rt_path = dp_cfg.get("d4rt_path", None)
+        if d4rt_path is not None and os.path.exists(d4rt_path):
+            bridge.run_from_d4rt(d4rt_path)
+        else:
+            bridge.run_from_video_npz(video_npz)
+
+        self.printer.print("Dynamic prediction done.", FontColor.INFO)
 
     def _eval_depth_all(self, ate_statistics, global_scale, r_a, t_a):
         """From Splat-SLAM. Not used in WildGS-SLAM evaluation, but might be useful in the future."""

@@ -27,3 +27,5 @@ glfw
 PyGLM
 mmengine
 tensorboard
+# ---- 动态预测模块新增依赖 ----
+filterpy>=1.4.5          # Kalman Filter（动态预测核心）

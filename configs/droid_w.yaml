@@ -158,6 +158,32 @@ mono_prior:
 
 data:
   output: ./output/wildgs_slam
+
+# ============================================================
+# 动态点运动预测模块（Dynamic Point Prediction）
+# 在 SLAM terminate() 完成后自动运行
+# ============================================================
+dynamic_prediction:
+  enable: False             # 设为 True 以启用动态预测流程
+
+  # 滑动窗口参数
+  window_size: 8            # 使用过去多少关键帧进行预测
+  predict_steps: 2          # 预测未来多少帧（通常 1-2）
+
+  # Kalman Filter 参数
+  process_noise: 0.1        # 过程噪声（越大越相信测量值）
+  measurement_noise: 1.0    # 测量噪声（越大越平滑）
+
+  # 动态点提取参数
+  uncer_thresh: 2.0         # 不确定性阈值（高于此值视为动态点）
+
+  # D4RT 集成（可选）
+  # 若指定此路径，将使用 D4RT 输出替代 DROID-W 不确定性图
+  d4rt_path: null           # /path/to/d4rt_output.npz
+
+  # 可视化参数
+  enable_vis: True          # 是否启用 Open3D 实时可视化
+  fps: 10.0                 # 可视化帧率（0=不限速）
   input_folder: Please_specify_the_path_to_the_dataset
 
 dataset: 'tumrgbd'
