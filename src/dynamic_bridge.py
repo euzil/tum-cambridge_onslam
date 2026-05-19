@@ -108,9 +108,10 @@ class DynamicBridge:
         video_npz_path: Optional[str] = None,
         output_dir: Optional[str] = None,
         gif_name: str = "dynamic_prediction.gif",
-        duration_ms: int = 150,
+        duration_ms: int = 100,
         max_history: int = 6,
         dot_radius: float = 3.0,
+        dataset_dir: Optional[str] = None,
     ) -> str:
         """
         把动态预测结果叠加到原始图像上并生成 GIF。
@@ -246,7 +247,7 @@ class DynamicBridge:
                                s=dot_radius ** 2, c="#FF3333",
                                alpha=0.75, linewidths=0, zorder=3)
 
-            # 🟡 预测落点 + 连接线（仅对当前帧存在的点）
+            # 🟡 预测落点 + 连接线（仅对当前帧存在的、且已有速度估计的点）
             current_pids = set(pids.tolist()) if len(pids) > 0 else set()
             if predictions and current_pids:
                 for pid, steps in predictions.items():
@@ -314,16 +315,71 @@ class DynamicBridge:
         if not frame_paths:
             return ""
 
+        # ---- 在关键帧之间插入原始 RGB 帧，消除跳帧感 ----
+        final_frame_paths = frame_paths      # 默认只用关键帧
+        final_durations   = [duration_ms] * len(frame_paths)
+
+        if dataset_dir is not None:
+            rgb_txt = os.path.join(dataset_dir, "rgb.txt")
+            if os.path.exists(rgb_txt):
+                # 解析 rgb.txt → {timestamp_int: abs_path}
+                ts2path = {}
+                with open(rgb_txt) as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line or line.startswith("#"):
+                            continue
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            ts_str, rel_path = parts[0], parts[1]
+                            ts_int = int(float(ts_str) * 1000)   # ms
+                            abs_path = os.path.join(dataset_dir, rel_path)
+                            ts2path[ts_int] = abs_path
+
+                kf_timestamps = [int(ts * 1000) for ts in npz["timestamps"]]
+                all_raw_ts    = sorted(ts2path.keys())
+
+                interp_dir = os.path.join(output_dir, "interp")
+                os.makedirs(interp_dir, exist_ok=True)
+
+                final_frame_paths = []
+                final_durations   = []
+
+                for ki, kf_ts in enumerate(kf_timestamps):
+                    # 插入从上一关键帧到当前关键帧之间的原始帧
+                    prev_ts = kf_timestamps[ki - 1] if ki > 0 else kf_ts
+                    between = [t for t in all_raw_ts if prev_ts < t < kf_ts]
+                    for raw_ts in between:
+                        raw_src = ts2path[raw_ts]
+                        raw_dst = os.path.join(
+                            interp_dir, f"raw_{raw_ts:015d}.png")
+                        if not os.path.exists(raw_dst):
+                            # 直接复制原始帧（不带任何标注）
+                            pil_raw = PILImage.open(raw_src).convert("RGBA")
+                            pil_raw.save(raw_dst)
+                        final_frame_paths.append(raw_dst)
+                        final_durations.append(duration_ms)
+                    # 当前关键帧（带预测标注）
+                    final_frame_paths.append(frame_paths[ki])
+                    final_durations.append(duration_ms * 2)  # 关键帧停留稍长
+
+                print(f"[DynamicBridge] 插帧后总帧数: {len(final_frame_paths)} "
+                      f"（关键帧 {len(frame_paths)}，插入原始帧 "
+                      f"{len(final_frame_paths)-len(frame_paths)}）")
+
         gif_path = os.path.join(self.save_dir, gif_name)
-        pil_frames = [PILImage.open(p).convert("RGBA") for p in frame_paths]
-        base_size = pil_frames[0].size
-        pil_frames = [f.resize(base_size, PILImage.LANCZOS) for f in pil_frames]
+        base_img  = PILImage.open(final_frame_paths[0]).convert("RGBA")
+        base_size = base_img.size
+        pil_frames = [
+            PILImage.open(p).convert("RGBA").resize(base_size, PILImage.LANCZOS)
+            for p in final_frame_paths
+        ]
         pil_frames[0].save(
             gif_path,
             save_all=True,
             append_images=pil_frames[1:],
             optimize=False,
-            duration=duration_ms,
+            duration=final_durations,
             loop=0,
         )
         print(f"[DynamicBridge] GIF 已保存：{gif_path}")
@@ -399,12 +455,13 @@ class OnlineDynamicPredictor:
     save_dir    : 输出目录
     """
 
-    def __init__(self, cfg: dict, save_dir: str) -> None:
+    def __init__(self, cfg: dict, save_dir: str, dataset_dir: str = "") -> None:
         self.cfg       = cfg
         self.save_dir  = save_dir
+        self.dataset_dir = dataset_dir   # 原始数据集目录，用于插入原始帧
         dp_cfg         = cfg.get("dynamic_prediction", {})
 
-        self.uncer_thresh  = dp_cfg.get("online_uncer_thresh", dp_cfg.get("uncer_thresh", 0.5))
+        self.uncer_thresh  = dp_cfg.get("uncer_thresh",   0.8)
         self.window_size   = dp_cfg.get("window_size",    8)
         self.predict_steps = dp_cfg.get("predict_steps",  2)
         self.match_radius  = dp_cfg.get("match_radius",   0.3)
@@ -427,6 +484,7 @@ class OnlineDynamicPredictor:
         self._frames_dir = os.path.join(save_dir, "dynamic_pred_frames")
         os.makedirs(self._frames_dir, exist_ok=True)
         self._frame_paths: list = []
+        self._kf_timestamps: list = []   # 每个关键帧对应的原始序列帧索引
         self._kf_count: int = 0
 
         import matplotlib
@@ -449,6 +507,7 @@ class OnlineDynamicPredictor:
             intr     = video.intrinsics[kf_idx].cpu().numpy()      # [4]
             uncer    = video.uncertainties[kf_idx].cpu().numpy()   # [H_l, W_l]
             img_t    = video.images[kf_idx].cpu().numpy()          # [3, H, W]
+            frame_ts = int(video.timestamp[kf_idx].item())         # 原始序列帧索引
 
         H_l, W_l = disp.shape
         _, H_img, W_img = img_t.shape
@@ -475,11 +534,16 @@ class OnlineDynamicPredictor:
         # ---- 喂给 Kalman 滑动窗口 ----
         self._predictor.add_frame(pts_world, pids)
 
-        predictions = {}
-        history     = {}
-        if self._predictor.ready():
-            predictions = self._predictor.predict()
-            history     = self._predictor.get_history()
+        # 无论 WARM 期还是 PRED 期，对所有已有 Kalman 状态的点强制预测
+        # 直接访问 _predictors，绕过 ready() 检查
+        predictions = {
+            pid: kf.predict(self.predict_steps)
+            for pid, kf in self._predictor._predictors.items()
+        }
+        history = self._predictor.get_history()
+
+        # ---- 预测反馈：把预测落点写入下一帧的不确定性图 ----
+        self._feedback_to_video(video, kf_idx, predictions, H_l, W_l)
 
         # ---- 渲染并保存帧 ----
         self._render_frame(
@@ -487,44 +551,176 @@ class OnlineDynamicPredictor:
             pts_world, pids, history, predictions,
             H_img, W_img,
         )
+        self._kf_timestamps.append(frame_ts)
         self._kf_count += 1
 
     def finalize(self, gif_name: str = "dynamic_prediction_online.gif") -> str:
-        """SLAM 结束后调用，合成 GIF 并生成关键帧图片。"""
+        """SLAM 结束后调用，合成 GIF（插入原始帧使播放流畅）并生成关键帧图片。"""
         if not self._frame_paths:
             return ""
 
-        gif_path = os.path.join(self.save_dir, gif_name)
-        pil_frames = [PILImage.open(p).convert("RGBA") for p in self._frame_paths]
-        base_size = pil_frames[0].size
-        pil_frames = [f.resize(base_size, PILImage.LANCZOS) for f in pil_frames]
-        pil_frames[0].save(
-            gif_path, save_all=True,
-            append_images=pil_frames[1:],
-            optimize=False, duration=self.duration_ms, loop=0,
-        )
-        print(f"[OnlineDynPred] GIF saved: {gif_path}")
+        # ---- 加载原始帧列表 ----
+        # rgb.txt 格式：  timestamp  rgb/filename.png
+        raw_frames = []   # [(frame_idx, abs_path), ...]
+        if self.dataset_dir:
+            rgb_txt = os.path.join(self.dataset_dir, "rgb.txt")
+            if os.path.exists(rgb_txt):
+                with open(rgb_txt) as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line or line.startswith("#"):
+                            continue
+                        parts = line.split()
+                        rel_path = parts[1]
+                        abs_path = os.path.join(self.dataset_dir, rel_path)
+                        raw_frames.append(abs_path)
+                print(f"[OnlineDynPred] 原始帧共 {len(raw_frames)} 张")
 
-        # 关键帧单独保存（动态点最多的 5 帧 + 第一个 PRED 帧）
-        import numpy as np
-        sizes = [0] * len(self._frame_paths)
-        for i, p in enumerate(self._frame_paths):
-            sizes[i] = os.path.getsize(p)
-        top5 = sorted(range(len(sizes)), key=lambda i: sizes[i], reverse=True)[:5]
+        # ---- 拼合带插值的帧序列 ----
+        base_size = PILImage.open(self._frame_paths[0]).size
+        all_frames = []      # [(pil_image, duration_ms)]
+
+        def load_raw(path):
+            img = PILImage.open(path).convert("RGBA").resize(base_size, PILImage.LANCZOS)
+            return img
+
+        def load_kf(path):
+            return PILImage.open(path).convert("RGBA").resize(base_size, PILImage.LANCZOS)
+
+        for i, (kf_path, kf_ts) in enumerate(zip(self._frame_paths, self._kf_timestamps)):
+            # 插入上一关键帧到本关键帧之间的原始帧
+            if raw_frames and i > 0:
+                prev_ts = self._kf_timestamps[i - 1]
+                # 上一关键帧之后、本关键帧之前的原始帧索引
+                for raw_idx in range(prev_ts + 1, kf_ts):
+                    if raw_idx < len(raw_frames) and os.path.exists(raw_frames[raw_idx]):
+                        all_frames.append((load_raw(raw_frames[raw_idx]), self.duration_ms))
+            # 关键帧本身（带预测标注，停留时间稍长）
+            all_frames.append((load_kf(kf_path), int(self.duration_ms * 1.5)))
+
+        if not all_frames:
+            return ""
+
+        gif_path = os.path.join(self.save_dir, gif_name)
+        imgs   = [f[0] for f in all_frames]
+        durs   = [f[1] for f in all_frames]
+        imgs[0].save(
+            gif_path, save_all=True,
+            append_images=imgs[1:],
+            optimize=False, duration=durs, loop=0,
+        )
+        print(f"[OnlineDynPred] GIF saved: {gif_path}  ({len(all_frames)} frames total, {len(self._frame_paths)} keyframes + {len(all_frames)-len(self._frame_paths)} raw)")
+
+        # ---- 关键帧单独保存 ----
+        sizes = [os.path.getsize(p) for p in self._frame_paths]
+        top5  = sorted(range(len(sizes)), key=lambda i: sizes[i], reverse=True)[:5]
         kf_set = set(top5) | {self.window_size - 1}
         kf_dir = os.path.join(self.save_dir, "dynamic_keyframes_online")
         os.makedirs(kf_dir, exist_ok=True)
         for idx in kf_set:
             if idx < len(self._frame_paths):
-                src = self._frame_paths[idx]
-                dst = os.path.join(kf_dir, f"keyframe_{idx:04d}.png")
-                PILImage.open(src).save(dst)
+                PILImage.open(self._frame_paths[idx]).save(
+                    os.path.join(kf_dir, f"keyframe_{idx:04d}.png"))
         print(f"[OnlineDynPred] Keyframes saved to: {kf_dir}")
         return gif_path
 
     # ------------------------------------------------------------------
     # 内部工具
     # ------------------------------------------------------------------
+
+
+    def _feedback_to_video(
+        self,
+        video,
+        kf_idx: int,
+        predictions: dict,
+        H_l: int,
+        W_l: int,
+        pred_uncer_value: float = 2.0,
+        blend_alpha: float = 0.7,
+        splat_radius: int = 2,
+    ) -> None:
+        """
+        把 Kalman 预测的下一帧动态点落点写回 video.uncertainties[kf_idx+1]。
+
+        原理
+        ----
+        video.ba() 内部会把不确定性换算成 BA 权重：
+            uncer_rescaled = clamp(45 * uncer - 35, min=0.1)
+            weight_mask    = clamp(1 / uncer_rescaled, 0, 1)
+        当 uncer >= 0.78 时 weight_mask <= 1.0，uncer=2.0 时 weight_mask≈0.011
+        写入高不确定性值 → 该像素 BA 权重趋近 0 → 不参与位姿/深度优化
+
+        Parameters
+        ----------
+        video            : DepthVideo 实例
+        kf_idx           : 当前关键帧索引，预测写入 kf_idx+1
+        predictions      : {pid: [pred_step0, pred_step1, ...]}  世界坐标
+        H_l / W_l        : 低分辨率图像尺寸（1/8 原图）
+        pred_uncer_value : 写入的不确定性值（>0.78 即开始压制，2.0 几乎完全压制）
+        blend_alpha      : 预测掩码与原有不确定性的混合权重（1.0=完全覆盖）
+        splat_radius     : 以预测像素为中心的扩散半径（像素，低分辨率下）
+        """
+        import torch
+
+        next_idx = kf_idx + 1
+        if next_idx >= video.uncertainties.shape[0]:
+            return
+        if not predictions:
+            return
+
+        with video.get_lock():
+            pose_7 = video.poses[next_idx].cpu().numpy()
+            intr   = video.intrinsics[next_idx].cpu().numpy()
+
+        import numpy as np
+        tx, ty, tz, qx, qy, qz, qw = pose_7
+        norm = (qx**2 + qy**2 + qz**2 + qw**2) ** 0.5 + 1e-12
+        qx, qy, qz, qw = qx/norm, qy/norm, qz/norm, qw/norm
+        R_cw = np.array([
+            [1-2*(qy**2+qz**2),   2*(qx*qy-qz*qw),   2*(qx*qz+qy*qw)],
+            [  2*(qx*qy+qz*qw), 1-2*(qx**2+qz**2),   2*(qy*qz-qx*qw)],
+            [  2*(qx*qz-qy*qw),   2*(qy*qz+qx*qw), 1-2*(qx**2+qy**2)],
+        ])
+        t_cw = np.array([tx, ty, tz])
+        fx, fy, cx, cy = intr  # 低分辨率内参，直接对应 H_l x W_l
+
+        # 收集所有预测落点（第 1 步）并投影到低分辨率像素坐标
+        pred_mask = np.zeros((H_l, W_l), dtype=bool)
+        for pid, steps in predictions.items():
+            if not steps:
+                continue
+            pt_w = np.asarray(steps[0], dtype=float)
+            if pt_w.ndim == 1:
+                pt_w = pt_w[None, :]
+            pt_c = (R_cw @ pt_w.T).T + t_cw[None, :]
+            z = pt_c[0, 2]
+            if z < 0.01:
+                continue
+            u = fx * pt_c[0, 0] / (z + 1e-8) + cx
+            v = fy * pt_c[0, 1] / (z + 1e-8) + cy
+            ui, vi = int(round(u)), int(round(v))
+            # splat：以预测落点为中心扩散 splat_radius 像素
+            r = splat_radius
+            u0 = max(ui - r, 0); u1 = min(ui + r + 1, W_l)
+            v0 = max(vi - r, 0); v1 = min(vi + r + 1, H_l)
+            if u1 > u0 and v1 > v0:
+                pred_mask[v0:v1, u0:u1] = True
+
+        if not pred_mask.any():
+            return
+
+        # 转为 torch tensor，写回 video.uncertainties[next_idx]
+        pred_mask_t = torch.from_numpy(pred_mask).to(video.uncertainties.device)
+        with video.get_lock():
+            orig = video.uncertainties[next_idx]            # [H_l, W_l]
+            # 混合：预测动态区域 → 拉高不确定性
+            high_val = torch.full_like(orig, pred_uncer_value)
+            video.uncertainties[next_idx] = torch.where(
+                pred_mask_t,
+                blend_alpha * high_val + (1.0 - blend_alpha) * orig,
+                orig,
+            )
 
     def _assign_ids(self, pts_world: "np.ndarray") -> "np.ndarray":
         import numpy as np
@@ -644,7 +840,7 @@ class OnlineDynamicPredictor:
                            s=self.dot_radius**2, c="#FF3333",
                            alpha=0.75, linewidths=0, zorder=3)
 
-        # 🟡 预测落点 + 橙色连接线（仅当前帧存在的点）
+        # 🟡 预测落点 + 橙色连接线（仅当前帧存在的、且已有速度估计的点）
         current_pids = set(pids.tolist()) if len(pids) > 0 else set()
         if predictions and current_pids:
             for pid, steps in predictions.items():

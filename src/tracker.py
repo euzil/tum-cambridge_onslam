@@ -49,6 +49,7 @@ class Tracker:
             self._online_dyn_pred = OnlineDynamicPredictor(
                 cfg=self.cfg,
                 save_dir=self.output,
+                dataset_dir=self.cfg.get("data", {}).get("input_folder", ""),
             )
 
     def run(self, stream:BaseDataset):
@@ -139,17 +140,24 @@ class Tracker:
                             else:
                                 self.online_ba.dense_ba(2, enable_update_uncer=False, enable_udba=self.frontend.enable_opt_dyn_mask)
                         prev_ba_idx = curr_kf_idx
+                        # Online BA 刚跑完，不确定性已更新 → 批量补齐所有新关键帧
+                        if self._online_dyn_pred is not None:
+                            start = getattr(self._online_dyn_pred, '_next_kf_to_update', 0)
+                            for kf in range(start, curr_kf_idx + 1):
+                                self._online_dyn_pred.update(self.video, kf)
+                            self._online_dyn_pred._next_kf_to_update = curr_kf_idx + 1
+                    else:
+                        # 未触发 Online BA：用当前 Local BA 结果更新单帧
+                        if self._online_dyn_pred is not None:
+                            start = getattr(self._online_dyn_pred, '_next_kf_to_update', 0)
+                            self._online_dyn_pred.update(self.video, curr_kf_idx)
+                            self._online_dyn_pred._next_kf_to_update = curr_kf_idx + 1
                     # inform the mapper that the estimation of current pose and depth is finished
                     if self.cfg['mapping']['enable']:
                         self.pipe.send({"is_keyframe":True, "video_idx":curr_kf_idx,
                                         "timestamp":timestamp, "just_initialized": False, 
                                         "end":False})
                         self.pipe.recv()
-
-            # 在线动态预测：新关键帧产生时更新
-            if curr_kf_idx != prev_kf_idx and self.frontend.is_initialized:
-                if self._online_dyn_pred is not None:
-                    self._online_dyn_pred.update(self.video, curr_kf_idx)
 
             prev_kf_idx = curr_kf_idx
             self.printer.update_pbar()

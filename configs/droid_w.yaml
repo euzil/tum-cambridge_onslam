@@ -175,12 +175,15 @@ dynamic_prediction:
   measurement_noise: 1.0    # 测量噪声（越大越平滑）
 
   # 动态点提取参数
-  uncer_thresh: 0.8         # 不确定性阈值（离线版，全局BA后使用）
-  online_uncer_thresh: 0.8  # 不确定性阈值（在线版，局部BA后使用，affine_weights未充分收敛）
+  uncer_thresh: 0.8         # 不确定性阈值（高于此值视为动态点）
 
   # 可视化参数
   enable_vis: False         # 是否启用 Open3D 实时可视化
   fps: 10.0                 # 可视化帧率（0=不限速）
   input_folder: Please_specify_the_path_to_the_dataset
+
+  pred_uncer_value: 2.0   # 越大压制越强
+  blend_alpha: 0.7         # 越大预测越激进
+  splat_radius: 2          # 越大覆盖范围越宽
 
 dataset: 'tumrgbd'
