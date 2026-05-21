@@ -165,6 +165,10 @@ data:
 # ============================================================
 dynamic_prediction:
   enable: True             # 设为 True 以启用动态预测流程
+  online_enable: True      # True: 跟踪过程中在线预测并反馈到下一关键帧不确定性
+  online_render: False     # True: 运行时保存在线预测叠加帧，较慢，仅调试时打开
+  online_make_gif: True   # True: 结束后合成 dynamic_prediction_online.gif，较慢
+  online_insert_raw_frames: True  # True: GIF 中插入原始非关键帧，文件更大且播放更慢
 
   # 滑动窗口参数
   window_size: 8            # 使用过去多少关键帧进行预测
@@ -175,15 +179,17 @@ dynamic_prediction:
   measurement_noise: 1.0    # 测量噪声（越大越平滑）
 
   # 动态点提取参数
-  uncer_thresh: 0.8         # 不确定性阈值（高于此值视为动态点）
+  uncer_thresh: 0.9         # 不确定性阈值（高于此值视为动态点）
 
   # 可视化参数
   enable_vis: False         # 是否启用 Open3D 实时可视化
   fps: 10.0                 # 可视化帧率（0=不限速）
-  input_folder: Please_specify_the_path_to_the_dataset
+  input_folder: /home/youran/文档/DROID-W/TUM-Cambridge_onSLAM/datasets/Bonn/rgbd_bonn_balloon
 
-  pred_uncer_value: 2.0   # 越大压制越强
-  blend_alpha: 0.7         # 越大预测越激进
-  splat_radius: 2          # 越大覆盖范围越宽
+  pred_uncer_value: 3.0   # 越大压制越强
+  blend_alpha: 0.5         # 越大预测越激进
+  splat_radius: 1          # 越大覆盖范围越宽
+  max_feedback_points: 120       # 最多反馈的预测点数，防止 dense mask 覆盖过大
+  max_feedback_coverage: 0.05    # 单帧反馈 mask 最大覆盖率，超过则跳过该帧反馈
 
 dataset: 'tumrgbd'

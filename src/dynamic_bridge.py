@@ -22,6 +22,31 @@ import matplotlib.patches as mpatches
 from PIL import Image as PILImage
 
 
+def _quat_to_rot(qx: float, qy: float, qz: float, qw: float) -> np.ndarray:
+    norm = np.sqrt(qx*qx + qy*qy + qz*qz + qw*qw) + 1e-12
+    qx, qy, qz, qw = qx/norm, qy/norm, qz/norm, qw/norm
+    return np.array([
+        [1 - 2*(qy**2 + qz**2),   2*(qx*qy - qz*qw),   2*(qx*qz + qy*qw)],
+        [  2*(qx*qy + qz*qw),   1 - 2*(qx**2 + qz**2), 2*(qy*qz - qx*qw)],
+        [  2*(qx*qz - qy*qw),     2*(qy*qz + qx*qw),   1 - 2*(qx**2 + qy**2)],
+    ], dtype=float)
+
+
+def _pose_to_w2c_matrix(pose: np.ndarray) -> np.ndarray:
+    """Return a 4x4 world-to-camera matrix from DROID-W pose formats."""
+    pose = np.asarray(pose)
+    if pose.shape == (4, 4):
+        # DepthVideo.save_video() writes camera-to-world matrices to "poses".
+        return np.linalg.inv(pose)
+    if pose.shape == (7,):
+        tx, ty, tz, qx, qy, qz, qw = pose
+        mat = np.eye(4, dtype=float)
+        mat[:3, :3] = _quat_to_rot(qx, qy, qz, qw)
+        mat[:3, 3] = np.array([tx, ty, tz], dtype=float)
+        return mat
+    raise ValueError(f"Unsupported pose shape: {pose.shape}")
+
+
 class DynamicBridge:
     """
     DROID-W 动态预测集成桥接器。
@@ -54,6 +79,10 @@ class DynamicBridge:
         self.uncer_thresh = uncer_thresh
         self.enable_vis = enable_vis
         self.fps = fps
+        dp_cfg = cfg.get("dynamic_prediction", {})
+        self.match_radius = dp_cfg.get("match_radius", 0.3)
+        self.process_noise = dp_cfg.get("process_noise", 0.1)
+        self.measurement_noise = dp_cfg.get("measurement_noise", 1.0)
 
     # ------------------------------------------------------------------
     # 公开接口
@@ -73,7 +102,10 @@ class DynamicBridge:
         from dynamic_prediction.d4rt_bridge import DROIDWBridge
         from dynamic_prediction.sliding_window import SlidingWindowPredictor
 
-        bridge = DROIDWBridge(uncer_thresh=self.uncer_thresh)
+        bridge = DROIDWBridge(
+            uncer_thresh=self.uncer_thresh,
+            match_radius=self.match_radius,
+        )
         dw_data = bridge.load(video_npz_path)
         frames, pids_list = bridge.extract_dynamic_points(dw_data)
 
@@ -87,6 +119,8 @@ class DynamicBridge:
         predictor = SlidingWindowPredictor(
             window_size=self.window_size,
             predict_steps=self.predict_steps,
+            process_noise=self.process_noise,
+            measurement_noise=self.measurement_noise,
         )
 
         visualizer = self._make_visualizer()
@@ -139,7 +173,7 @@ class DynamicBridge:
 
         npz        = np.load(video_npz_path, allow_pickle=True)
         images     = np.asarray(npz["images"])      # [T, 3, H, W] float32 0~1
-        poses      = np.asarray(npz["poses"])       # [T, 4, 4] world-to-camera
+        pose_data  = np.asarray(npz["tum_poses"] if "tum_poses" in npz else npz["poses"])
         intrinsics = np.asarray(npz["intrinsics"])  # [T, 4] 低分辨率内参
 
         T, _, H_img, W_img = images.shape
@@ -147,13 +181,18 @@ class DynamicBridge:
         scale_x = W_img / (W_img // 8)  # = 8.0
         scale_y = H_img / (H_img // 8)  # = 8.0
 
-        bridge = DROIDWBridge(uncer_thresh=self.uncer_thresh)
+        bridge = DROIDWBridge(
+            uncer_thresh=self.uncer_thresh,
+            match_radius=self.match_radius,
+        )
         dw_data = bridge.load(video_npz_path)
         frames, pids_list = bridge.extract_dynamic_points(dw_data)
 
         predictor = SlidingWindowPredictor(
             window_size=self.window_size,
             predict_steps=self.predict_steps,
+            process_noise=self.process_noise,
+            measurement_noise=self.measurement_noise,
         )
 
         # 预先计算关键帧：动态点最多的5帧 + 第一个PRED帧
@@ -200,7 +239,7 @@ class DynamicBridge:
             fy = fy_l * scale_y
             cx = cx_l * scale_x
             cy = cy_l * scale_y
-            pose_cw = poses[t]
+            pose_cw = _pose_to_w2c_matrix(pose_data[t])
 
             fig, ax = plt.subplots(
                 1, 1,
@@ -468,11 +507,23 @@ class OnlineDynamicPredictor:
         self.max_history   = dp_cfg.get("max_history",    6)
         self.dot_radius    = dp_cfg.get("dot_radius",     3.0)
         self.duration_ms   = dp_cfg.get("duration_ms",    150)
+        self.pred_uncer_value = dp_cfg.get("pred_uncer_value", 2.0)
+        self.blend_alpha      = dp_cfg.get("blend_alpha",      0.7)
+        self.splat_radius     = dp_cfg.get("splat_radius",     2)
+        self.process_noise    = dp_cfg.get("process_noise",    0.1)
+        self.measurement_noise = dp_cfg.get("measurement_noise", 1.0)
+        self.online_render    = dp_cfg.get("online_render",    False)
+        self.online_make_gif  = dp_cfg.get("online_make_gif",  False)
+        self.online_insert_raw_frames = dp_cfg.get("online_insert_raw_frames", False)
+        self.max_feedback_points = dp_cfg.get("max_feedback_points", 200)
+        self.max_feedback_coverage = dp_cfg.get("max_feedback_coverage", 0.08)
 
         from dynamic_prediction.sliding_window import SlidingWindowPredictor
         self._predictor = SlidingWindowPredictor(
             window_size   = self.window_size,
             predict_steps = self.predict_steps,
+            process_noise = self.process_noise,
+            measurement_noise = self.measurement_noise,
         )
 
         # 跨帧匹配状态
@@ -486,6 +537,15 @@ class OnlineDynamicPredictor:
         self._frame_paths: list = []
         self._kf_timestamps: list = []   # 每个关键帧对应的原始序列帧索引
         self._kf_count: int = 0
+        self._next_kf_to_update: int = 0
+        self._pending_predictions: dict = {}
+        self._feedback_log_path = os.path.join(save_dir, "dynamic_feedback_stats.csv")
+        if not os.path.exists(self._feedback_log_path):
+            with open(self._feedback_log_path, "w", encoding="utf-8") as f:
+                f.write(
+                    "kf_idx,n_predictions,n_projected,mask_pixels,coverage,"
+                    "uncer_before_max,uncer_after_max,applied\n"
+                )
 
         import matplotlib
         matplotlib.use("Agg")
@@ -501,6 +561,9 @@ class OnlineDynamicPredictor:
         import numpy as np
 
         # ---- 从 DepthVideo 读取当前关键帧数据 ----
+        if not hasattr(video, "uncertainties"):
+            return
+
         with video.get_lock():
             pose_7   = video.poses[kf_idx].cpu().numpy()          # [7]
             disp     = video.disps[kf_idx].cpu().numpy()           # [H_l, W_l]
@@ -542,21 +605,48 @@ class OnlineDynamicPredictor:
         }
         history = self._predictor.get_history()
 
-        # ---- 预测反馈：把预测落点写入下一帧的不确定性图 ----
-        self._feedback_to_video(video, kf_idx, predictions, H_l, W_l)
+        # 缓存给下一关键帧。下一帧刚 append 后、frontend BA 前写入，
+        # 这样预测动态区域才会真正参与当前 SLAM 优化权重。
+        self._pending_predictions = predictions
 
-        # ---- 渲染并保存帧 ----
-        self._render_frame(
-            img_t, pose_7, intr, scale_x, scale_y,
-            pts_world, pids, history, predictions,
-            H_img, W_img,
-        )
+        if self.online_render:
+            self._render_frame(
+                img_t, pose_7, intr, scale_x, scale_y,
+                pts_world, pids, history, predictions,
+                H_img, W_img,
+            )
         self._kf_timestamps.append(frame_ts)
         self._kf_count += 1
 
+    def apply_pending_feedback(self, video, kf_idx: int) -> bool:
+        """
+        将上一关键帧预测出的动态落点写入当前关键帧 uncertainty。
+
+        调用时机必须在当前关键帧 append 之后、frontend BA 之前。
+        返回 True 表示有预测 mask 被写入。
+        """
+        if not hasattr(video, "uncertainties") or not self._pending_predictions:
+            return False
+
+        with video.get_lock():
+            H_l, W_l = video.uncertainties[kf_idx].shape
+
+        return self._feedback_to_video(
+            video,
+            kf_idx,
+            self._pending_predictions,
+            H_l,
+            W_l,
+            pred_uncer_value=self.pred_uncer_value,
+            blend_alpha=self.blend_alpha,
+            splat_radius=self.splat_radius,
+            max_feedback_points=self.max_feedback_points,
+            max_feedback_coverage=self.max_feedback_coverage,
+        )
+
     def finalize(self, gif_name: str = "dynamic_prediction_online.gif") -> str:
         """SLAM 结束后调用，合成 GIF（插入原始帧使播放流畅）并生成关键帧图片。"""
-        if not self._frame_paths:
+        if not self.online_make_gif or not self._frame_paths:
             return ""
 
         # ---- 加载原始帧列表 ----
@@ -589,7 +679,7 @@ class OnlineDynamicPredictor:
 
         for i, (kf_path, kf_ts) in enumerate(zip(self._frame_paths, self._kf_timestamps)):
             # 插入上一关键帧到本关键帧之间的原始帧
-            if raw_frames and i > 0:
+            if self.online_insert_raw_frames and raw_frames and i > 0:
                 prev_ts = self._kf_timestamps[i - 1]
                 # 上一关键帧之后、本关键帧之前的原始帧索引
                 for raw_idx in range(prev_ts + 1, kf_ts):
@@ -639,9 +729,11 @@ class OnlineDynamicPredictor:
         pred_uncer_value: float = 2.0,
         blend_alpha: float = 0.7,
         splat_radius: int = 2,
-    ) -> None:
+        max_feedback_points: int = 200,
+        max_feedback_coverage: float = 0.08,
+    ) -> bool:
         """
-        把 Kalman 预测的下一帧动态点落点写回 video.uncertainties[kf_idx+1]。
+        把 Kalman 预测的动态点落点写回 video.uncertainties[kf_idx]。
 
         原理
         ----
@@ -654,40 +746,41 @@ class OnlineDynamicPredictor:
         Parameters
         ----------
         video            : DepthVideo 实例
-        kf_idx           : 当前关键帧索引，预测写入 kf_idx+1
+        kf_idx           : 写入的当前关键帧索引
         predictions      : {pid: [pred_step0, pred_step1, ...]}  世界坐标
         H_l / W_l        : 低分辨率图像尺寸（1/8 原图）
         pred_uncer_value : 写入的不确定性值（>0.78 即开始压制，2.0 几乎完全压制）
         blend_alpha      : 预测掩码与原有不确定性的混合权重（1.0=完全覆盖）
         splat_radius     : 以预测像素为中心的扩散半径（像素，低分辨率下）
+        max_feedback_points    : 最多反馈多少个预测点，防止 dense mask 过大
+        max_feedback_coverage  : 预测 mask 允许覆盖的最大图像比例
         """
         import torch
 
-        next_idx = kf_idx + 1
-        if next_idx >= video.uncertainties.shape[0]:
-            return
+        if kf_idx >= video.uncertainties.shape[0]:
+            return False
         if not predictions:
-            return
+            return False
 
         with video.get_lock():
-            pose_7 = video.poses[next_idx].cpu().numpy()
-            intr   = video.intrinsics[next_idx].cpu().numpy()
+            pose_7 = video.poses[kf_idx].cpu().numpy()
+            intr   = video.intrinsics[kf_idx].cpu().numpy()
 
         import numpy as np
         tx, ty, tz, qx, qy, qz, qw = pose_7
-        norm = (qx**2 + qy**2 + qz**2 + qw**2) ** 0.5 + 1e-12
-        qx, qy, qz, qw = qx/norm, qy/norm, qz/norm, qw/norm
-        R_cw = np.array([
-            [1-2*(qy**2+qz**2),   2*(qx*qy-qz*qw),   2*(qx*qz+qy*qw)],
-            [  2*(qx*qy+qz*qw), 1-2*(qx**2+qz**2),   2*(qy*qz-qx*qw)],
-            [  2*(qx*qz-qy*qw),   2*(qy*qz+qx*qw), 1-2*(qx**2+qy**2)],
-        ])
+        R_cw = _quat_to_rot(qx, qy, qz, qw)
         t_cw = np.array([tx, ty, tz])
         fx, fy, cx, cy = intr  # 低分辨率内参，直接对应 H_l x W_l
 
         # 收集所有预测落点（第 1 步）并投影到低分辨率像素坐标
+        projected_centers = []
+        pred_items = list(predictions.items())
+        if max_feedback_points and len(pred_items) > max_feedback_points:
+            step = max(1, len(pred_items) // max_feedback_points)
+            pred_items = pred_items[::step][:max_feedback_points]
+
         pred_mask = np.zeros((H_l, W_l), dtype=bool)
-        for pid, steps in predictions.items():
+        for pid, steps in pred_items:
             if not steps:
                 continue
             pt_w = np.asarray(steps[0], dtype=float)
@@ -700,6 +793,12 @@ class OnlineDynamicPredictor:
             u = fx * pt_c[0, 0] / (z + 1e-8) + cx
             v = fy * pt_c[0, 1] / (z + 1e-8) + cy
             ui, vi = int(round(u)), int(round(v))
+            if not (0 <= ui < W_l and 0 <= vi < H_l):
+                continue
+            projected_centers.append((ui, vi))
+
+        n_projected = len(projected_centers)
+        for ui, vi in projected_centers:
             # splat：以预测落点为中心扩散 splat_radius 像素
             r = splat_radius
             u0 = max(ui - r, 0); u1 = min(ui + r + 1, W_l)
@@ -708,18 +807,63 @@ class OnlineDynamicPredictor:
                 pred_mask[v0:v1, u0:u1] = True
 
         if not pred_mask.any():
-            return
+            self._write_feedback_stat(
+                kf_idx, len(predictions), n_projected, 0, H_l * W_l,
+                0.0, 0.0, False,
+            )
+            return False
 
-        # 转为 torch tensor，写回 video.uncertainties[next_idx]
+        mask_pixels = int(pred_mask.sum())
+        coverage = mask_pixels / max(H_l * W_l, 1)
+        if max_feedback_coverage and coverage > max_feedback_coverage:
+            self._write_feedback_stat(
+                kf_idx, len(predictions), n_projected, mask_pixels, H_l * W_l,
+                0.0, 0.0, False,
+            )
+            return False
+
+        # 转为 torch tensor，写回 video.uncertainties[kf_idx]
         pred_mask_t = torch.from_numpy(pred_mask).to(video.uncertainties.device)
         with video.get_lock():
-            orig = video.uncertainties[next_idx]            # [H_l, W_l]
+            orig = video.uncertainties[kf_idx]            # [H_l, W_l]
+            before_max = float(orig.max().item())
             # 混合：预测动态区域 → 拉高不确定性
             high_val = torch.full_like(orig, pred_uncer_value)
-            video.uncertainties[next_idx] = torch.where(
+            video.uncertainties[kf_idx] = torch.where(
                 pred_mask_t,
                 blend_alpha * high_val + (1.0 - blend_alpha) * orig,
                 orig,
+            )
+            after_max = float(video.uncertainties[kf_idx].max().item())
+        self._write_feedback_stat(
+            kf_idx,
+            len(predictions),
+            n_projected,
+            mask_pixels,
+            H_l * W_l,
+            before_max,
+            after_max,
+            True,
+        )
+        return True
+
+    def _write_feedback_stat(
+        self,
+        kf_idx: int,
+        n_predictions: int,
+        n_projected: int,
+        mask_pixels: int,
+        total_pixels: int,
+        uncer_before_max: float,
+        uncer_after_max: float,
+        applied: bool,
+    ) -> None:
+        coverage = mask_pixels / max(total_pixels, 1)
+        with open(self._feedback_log_path, "a", encoding="utf-8") as f:
+            f.write(
+                f"{kf_idx},{n_predictions},{n_projected},{mask_pixels},"
+                f"{coverage:.8f},{uncer_before_max:.6f},"
+                f"{uncer_after_max:.6f},{int(applied)}\n"
             )
 
     def _assign_ids(self, pts_world: "np.ndarray") -> "np.ndarray":
@@ -753,13 +897,7 @@ class OnlineDynamicPredictor:
     def _cam_to_world(pts_cam: "np.ndarray", pose_7: "np.ndarray") -> "np.ndarray":
         import numpy as np
         tx, ty, tz, qx, qy, qz, qw = pose_7
-        norm = (qx**2 + qy**2 + qz**2 + qw**2) ** 0.5
-        qx, qy, qz, qw = qx/norm, qy/norm, qz/norm, qw/norm
-        R_cw = np.array([
-            [1-2*(qy**2+qz**2),   2*(qx*qy-qz*qw),   2*(qx*qz+qy*qw)],
-            [  2*(qx*qy+qz*qw), 1-2*(qx**2+qz**2),   2*(qy*qz-qx*qw)],
-            [  2*(qx*qz-qy*qw),   2*(qy*qz+qx*qw), 1-2*(qx**2+qy**2)],
-        ])
+        R_cw = _quat_to_rot(qx, qy, qz, qw)
         t_cw = np.array([tx, ty, tz])
         return (R_cw.T @ (pts_cam - t_cw[None, :]).T).T
 
@@ -774,13 +912,7 @@ class OnlineDynamicPredictor:
 
         # 重建 [4,4] world-to-camera 矩阵
         tx, ty, tz, qx, qy, qz, qw = pose_7
-        norm = (qx**2 + qy**2 + qz**2 + qw**2) ** 0.5
-        qx, qy, qz, qw = qx/norm, qy/norm, qz/norm, qw/norm
-        R_cw = np.array([
-            [1-2*(qy**2+qz**2),   2*(qx*qy-qz*qw),   2*(qx*qz+qy*qw)],
-            [  2*(qx*qy+qz*qw), 1-2*(qx**2+qz**2),   2*(qy*qz-qx*qw)],
-            [  2*(qx*qz-qy*qw),   2*(qy*qz+qx*qw), 1-2*(qx**2+qy**2)],
-        ])
+        R_cw = _quat_to_rot(qx, qy, qz, qw)
         t_cw = np.array([tx, ty, tz])
         pose_cw = np.eye(4)
         pose_cw[:3, :3] = R_cw

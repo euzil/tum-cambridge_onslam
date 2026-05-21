@@ -143,7 +143,14 @@ class DROIDWBridge:
 
         data = np.load(video_npz_path, allow_pickle=True)
 
-        poses_raw = np.asarray(data["poses"])  # [T,4,4] 或 [T,7]
+        # 本仓库 DepthVideo.save_video() 保存两套位姿：
+        #   poses     : [T,4,4] camera-to-world 矩阵，用于轨迹/建图输出
+        #   tum_poses : [T,7]   world-to-camera SE3 buffer 原始格式
+        # 动态点反投影优先使用 tum_poses，避免把 c2w 当成 w2c。
+        if "tum_poses" in data:
+            poses_raw = np.asarray(data["tum_poses"])  # [T,7] world-to-camera
+        else:
+            poses_raw = np.asarray(data["poses"])      # [T,4,4] camera-to-world 或 [T,7]
 
         # disps: 优先使用与 uncertainties 尺寸一致的低分辨率版本
         if "droid_disps" in data:
@@ -288,20 +295,21 @@ class DROIDWBridge:
         """
         将相机坐标系下的点转换到世界坐标系。
 
-        pose_cw : [4, 4] world-to-camera 变换矩阵
+        pose_cw : [4, 4] camera-to-world 变换矩阵（DepthVideo.save_video 的 poses）
                   或 [7]  [tx, ty, tz, qx, qy, qz, qw]（world-to-camera）
         返回 [N, 3]
         """
         if pose_cw.shape == (4, 4):
-            R_cw = pose_cw[:3, :3]
-            t_cw = pose_cw[:3, 3]
+            R_wc = pose_cw[:3, :3]
+            t_wc = pose_cw[:3, 3]
+            pts_world = (R_wc @ pts_cam.T).T + t_wc[None, :]
+            return pts_world
         else:
             # [7]: tx, ty, tz, qx, qy, qz, qw
             t_cw = pose_cw[:3]
             qx, qy, qz, qw = pose_cw[3], pose_cw[4], pose_cw[5], pose_cw[6]
             R_cw = DROIDWBridge._quat_to_rot(qx, qy, qz, qw)
 
-        # X_world = R_cw^T @ (X_cam - t_cw)
         pts_world = (R_cw.T @ (pts_cam - t_cw[None, :]).T).T
         return pts_world
 

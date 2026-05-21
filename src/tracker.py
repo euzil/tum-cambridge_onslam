@@ -44,12 +44,15 @@ class Tracker:
         # 在线动态预测器
         self._online_dyn_pred = None
         dp_cfg = self.cfg.get("dynamic_prediction", {})
-        if dp_cfg.get("enable", False):
+        if dp_cfg.get("enable", False) and dp_cfg.get("online_enable", True):
             from src.dynamic_bridge import OnlineDynamicPredictor
             self._online_dyn_pred = OnlineDynamicPredictor(
                 cfg=self.cfg,
                 save_dir=self.output,
-                dataset_dir=self.cfg.get("data", {}).get("input_folder", ""),
+                dataset_dir=dp_cfg.get(
+                    "input_folder",
+                    self.cfg.get("data", {}).get("input_folder", ""),
+                ),
             )
 
     def run(self, stream:BaseDataset):
@@ -76,6 +79,9 @@ class Tracker:
                 ### check there is enough motion
                 with timer.section("Tracking"):
                     force_to_add_keyframe = self.motion_filter.track(timestamp, image, intrinsic)   # only pre-compute dino features, ...
+                    if self._online_dyn_pred is not None and starting_count < self.video.counter.value:
+                        new_kf_idx = self.video.counter.value - 1
+                        self._online_dyn_pred.apply_pending_feedback(self.video, new_kf_idx)
                     # local bundle adjustment
                     self.frontend(force_to_add_keyframe, self.event_writer)
 
@@ -142,15 +148,16 @@ class Tracker:
                         prev_ba_idx = curr_kf_idx
                         # Online BA 刚跑完，不确定性已更新 → 批量补齐所有新关键帧
                         if self._online_dyn_pred is not None:
-                            start = getattr(self._online_dyn_pred, '_next_kf_to_update', 0)
+                            start = self._online_dyn_pred._next_kf_to_update
                             for kf in range(start, curr_kf_idx + 1):
                                 self._online_dyn_pred.update(self.video, kf)
                             self._online_dyn_pred._next_kf_to_update = curr_kf_idx + 1
                     else:
-                        # 未触发 Online BA：用当前 Local BA 结果更新单帧
+                        # 未触发 Online BA：用当前 Local BA 结果补齐新关键帧
                         if self._online_dyn_pred is not None:
-                            start = getattr(self._online_dyn_pred, '_next_kf_to_update', 0)
-                            self._online_dyn_pred.update(self.video, curr_kf_idx)
+                            start = self._online_dyn_pred._next_kf_to_update
+                            for kf in range(start, curr_kf_idx + 1):
+                                self._online_dyn_pred.update(self.video, kf)
                             self._online_dyn_pred._next_kf_to_update = curr_kf_idx + 1
                     # inform the mapper that the estimation of current pose and depth is finished
                     if self.cfg['mapping']['enable']:
@@ -169,5 +176,3 @@ class Tracker:
         # 合成在线预测 GIF
         if self._online_dyn_pred is not None:
             self._online_dyn_pred.finalize()
-
-                
