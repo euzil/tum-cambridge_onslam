@@ -1,12 +1,37 @@
-inherit_from: ./configs/Dynamic/Bonn/bonn_dynamic.yaml
+﻿inherit_from: ./configs/Dynamic/Bonn/bonn_dynamic.yaml
 scene: bonn_balloon
 
 data:
   input_folder: ROOT_FOLDER_PLACEHOLDER/rgbd_bonn_balloon
 
+# Static-reconstruction-first overrides.
+# Goal: keep more stable background points and avoid over-suppressing uncertain regions.
 tracking:
-  buffer: 150        # 原来350，减少关键帧缓存
+  buffer: 350
+  motion_filter:
+    thresh: 2.5
+  multiview_filter:
+    thresh: 0.02
+    visible_num: 1
   frontend:
-    window: 15       # 原来25，减少局部BA窗口
-    max_factors: 50  # 原来75，减少最大边数inherit_from: ./configs/Dynamic/Bonn/bonn_dynamic.yaml
-scene: bonn_balloon
+    keyframe_thresh: 2.0
+    window: 35
+    radius: 3
+    nms: 1
+    max_factors: 120
+    enable_opt_dyn_mask: false
+  backend:
+    final_ba: true
+    ba_freq: 15
+    thresh: 30.0
+    radius: 2
+    nms: 3
+    loop_thresh: 30.0
+    loop_radius: 2
+    loop_nms: 6
+  uncertainty_params:
+    activate: false
+    visualize: false
+
+dynamic_prediction:
+  online_enable: false
