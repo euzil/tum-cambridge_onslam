@@ -727,6 +727,11 @@ view_static_env_dynamic_timeline_matlab( ...
   
 addpath('scripts_eval')
 
+python scripts_eval/check_4d_export_consistency.py \
+  --video-npz Outputs/Bonn/bonn_balloon_visual/video.npz \
+  --model-npz Outputs/Bonn/bonn_balloon_visual/4d_model_checked/model_4d.npz \
+  --model-mat Outputs/Bonn/bonn_balloon_visual/4d_model_checked/model_4d.mat
+
 view_4d_model_matlab( ...
     'Outputs/Bonn/bonn_balloon_visual/4d_model_checked/model_4d.mat', ...
     8, true, 'none', true)
