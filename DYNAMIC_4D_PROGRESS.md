@@ -597,6 +597,85 @@ addpath('scripts_eval')
 view_object_4d_model_matlab('Outputs/Bonn/bonn_balloon/object_4d_model/object_4d_model.mat', 8, true)
 ```
 
+### 13. 静态 3D 重建导出与 MATLAB 查看
+
+除了动态 4D 点云动画，当前还可以从 `video.npz` 导出静态背景 3D 重建。
+
+示例命令：
+
+```bash
+/home/youran/miniconda3/envs/droid-w/bin/python scripts_eval/export_static_reconstruction.py \
+  --video-npz Outputs/Bonn/bonn_balloon/video.npz \
+  --output-dir Outputs/Bonn/bonn_balloon/static_3d
+```
+
+当前 Bonn balloon 输出：
+
+```text
+[static] Saved MATLAB reconstruction: Outputs/Bonn/bonn_balloon/static_3d/static_reconstruction.mat
+[static] Saved PLY reconstruction: Outputs/Bonn/bonn_balloon/static_3d/static_reconstruction.ply
+[static] Final static points: 8634181
+```
+
+`static_reconstruction.mat` 主要变量：
+
+```text
+points        Nx3 single，静态点云世界坐标
+colors        Nx3 uint8，RGB 颜色
+colors01      Nx3 single，0-1 范围 RGB
+voxel_weight  Nx1 single，体素融合权重
+poses_c2w     Tx4x4 single，相机位姿
+intrinsics    Tx4 single，相机内参
+timestamps    Tx1 single，时间戳 / 帧索引
+```
+
+MATLAB 直接显示 `.mat`：
+
+```matlab
+S = load('Outputs/Bonn/bonn_balloon/static_3d/static_reconstruction.mat');
+
+pts = double(S.points);
+rgb = double(S.colors) / 255.0;
+
+figure('Color','k');
+pcshow(pts, rgb, 'MarkerSize', 20);
+axis equal;
+grid on;
+xlabel('X'); ylabel('Y'); zlabel('Z');
+title('Static 3D Reconstruction');
+```
+
+由于点数可能非常大，例如当前约 `8.63M` 点，MATLAB 全量显示可能较卡。建议优先使用随机降采样：
+
+```matlab
+S = load('Outputs/Bonn/bonn_balloon/static_3d/static_reconstruction.mat');
+
+N = size(S.points, 1);
+idx = randperm(N, min(500000, N));
+
+pts = double(S.points(idx, :));
+rgb = double(S.colors(idx, :)) / 255.0;
+
+figure('Color','k');
+pcshow(pts, rgb, 'MarkerSize', 20);
+axis equal;
+grid on;
+xlabel('X'); ylabel('Y'); zlabel('Z');
+title('Static 3D Reconstruction Downsampled');
+```
+
+也可以直接读取 PLY 文件：
+
+```matlab
+pc = pcread('Outputs/Bonn/bonn_balloon/static_3d/static_reconstruction.ply');
+
+figure('Color','k');
+pcshow(pc, 'MarkerSize', 20);
+axis equal;
+grid on;
+title('Static 3D Reconstruction PLY');
+```
+
 ## 当前结论
 
 1. 相机 RMSE 不是动态物体 4D 建模的主指标。
