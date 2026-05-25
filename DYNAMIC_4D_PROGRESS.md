@@ -142,3 +142,19 @@ view_static_env_dynamic_timeline_matlab( ...
 - 如果点云方向错：优先在可视化函数里改 `axisMode`（如 `'flip_z'`）。
 - 如果动态点太稀或太多：先调整导出时 `--uncer-thresh`。
 - 如果 MATLAB 卡顿：减小点大小，或在前处理阶段加大体素大小。
+
+
+你这个现象很可能是真的，而且代码路径上有两个常见“看起来加了预测，实际没影响定位”的原因：
+
+slam.py 里的 run_dynamic_prediction() 是在 SLAM 结束后 才跑的（离线），不会反作用到当次位姿优化。
+真正影响 SLAM 的是在线分支 OnlineDynamicPredictor（tracker.py 里），并且只通过两条弱耦合路径影响 BA：
+改 uncertainty 权重
+写 dynamic_motion_* 到相邻关键帧边（i -> i+1）
+所以你“加入预测后定位没提升”在当前实现下完全可能。
+
+建议你先做这 3 个确认（最快定位问题）：
+
+确认在线预测真的启用：dynamic_prediction.enable=True 且 online_enable=True。
+确认 BA 动态补偿真的启用：motion_comp_ba=True，并检查 video.npz 中 dynamic_motion_masks 非零比例。
+对比有/无预测两次运行的 est_poses（ATE/RMSE）；不要只看 model_4d 可视化。
+如果你愿意，我可以下一步直接给你加一份“在线反馈生效诊断日志”（每帧写入了多少动态 mask、覆盖率多少、参与了多少 BA 边），这样我们能快速判断是“预测质量问题”还是“预测没真正进优化”

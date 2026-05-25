@@ -68,9 +68,11 @@ end
 nFrames = max(1, round(max([dynFid; mapFirstFid])));
 M = [];
 hasPred = false;
+hasMotionValid = false;
 if ~isempty(modelPath) && exist(modelPath, 'file')
     M = load(modelPath);
     hasPred = isfield(M, 'predicted_next_points') && isfield(M, 'frame_start_1') && isfield(M, 'frame_end_1');
+    hasMotionValid = isfield(M, 'motion_valid');
     if hasPred
         nFrames = max(nFrames, numel(M.frame_start_1));
     end
@@ -151,6 +153,13 @@ slider.Callback = @(src, ~) update_frame(round(src.Value));
                 if isfield(M, 'dynamic')
                     dmask = logical(M.dynamic(lo:hi));
                     pred = pred(dmask, :); % show predicted points for dynamic subset
+                    if hasMotionValid
+                        mvalid = logical(M.motion_valid(lo:hi));
+                        pred = pred(mvalid(dmask), :); % only keep points with real predicted motion
+                    end
+                elseif hasMotionValid
+                    mvalid = logical(M.motion_valid(lo:hi));
+                    pred = pred(mvalid, :); % conservative fallback
                 end
                 if ~isempty(pred)
                     set(hPred, 'XData', pred(:,1), 'YData', pred(:,2), 'ZData', pred(:,3), ...
