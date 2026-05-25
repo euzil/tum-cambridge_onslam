@@ -1,37 +1,27 @@
-﻿inherit_from: ./configs/Dynamic/Bonn/bonn_dynamic.yaml
+inherit_from: ./configs/Dynamic/Bonn/bonn_dynamic.yaml
 scene: bonn_balloon
 
 data:
   input_folder: ROOT_FOLDER_PLACEHOLDER/rgbd_bonn_balloon
 
-# Static-reconstruction-first overrides.
-# Goal: keep more stable background points and avoid over-suppressing uncertain regions.
 tracking:
-  buffer: 350
+  buffer: 200
   motion_filter:
     thresh: 2.5
-  multiview_filter:
-    thresh: 0.02
-    visible_num: 1
   frontend:
-    keyframe_thresh: 2.0
-    window: 35
-    radius: 3
-    nms: 1
-    max_factors: 120
-    enable_opt_dyn_mask: false
-  backend:
-    final_ba: true
-    ba_freq: 15
-    thresh: 30.0
-    radius: 2
-    nms: 3
-    loop_thresh: 30.0
-    loop_radius: 2
-    loop_nms: 6
-  uncertainty_params:
-    activate: false
-    visualize: false
+    window: 15
+    max_factors: 50
 
 dynamic_prediction:
-  online_enable: false
+  online_enable: True
+
+  # Keep enough dynamic candidates for 4D object modeling. The old pure
+  # uncertainty threshold often left only 4-19 predicted points per keyframe.
+  uncer_thresh: 0.8
+  min_dynamic_points: 300
+  max_dynamic_points: 800
+
+  max_feedback_points: 600
+  max_feedback_coverage: 0.12
+  splat_radius: 2
+  motion_comp_radius: 2

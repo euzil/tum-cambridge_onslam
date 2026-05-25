@@ -504,6 +504,8 @@ class OnlineDynamicPredictor:
         self.window_size   = dp_cfg.get("window_size",    8)
         self.predict_steps = dp_cfg.get("predict_steps",  2)
         self.match_radius  = dp_cfg.get("match_radius",   0.3)
+        self.min_dynamic_points = int(dp_cfg.get("min_dynamic_points", 0))
+        self.max_dynamic_points = int(dp_cfg.get("max_dynamic_points", 0))
         self.max_history   = dp_cfg.get("max_history",    6)
         self.dot_radius    = dp_cfg.get("dot_radius",     3.0)
         self.duration_ms   = dp_cfg.get("duration_ms",    150)
@@ -544,13 +546,32 @@ class OnlineDynamicPredictor:
         self._next_kf_to_update: int = 0
         self._pending_predictions: dict = {}
         self._pending_motion: dict = {}
+        self._applied_feedback_pairs: set = set()
         self._feedback_log_path = os.path.join(save_dir, "dynamic_feedback_stats.csv")
-        if not os.path.exists(self._feedback_log_path):
-            with open(self._feedback_log_path, "w", encoding="utf-8") as f:
-                f.write(
-                    "kf_idx,n_predictions,n_projected,mask_pixels,coverage,"
-                    "uncer_before_max,uncer_after_max,applied\n"
-                )
+        self._id_log_path = os.path.join(save_dir, "dynamic_id_match_stats.csv")
+        with open(self._feedback_log_path, "w", encoding="utf-8") as f:
+            f.write(
+                "kf_idx,n_predictions,n_projected,mask_pixels,coverage,"
+                "uncer_before_max,uncer_after_max,applied\n"
+            )
+        with open(self._id_log_path, "w", encoding="utf-8") as f:
+            f.write(
+                "kf_idx,n_points,n_matched,n_new,n_unique_ids,match_ratio,"
+                "min_dist,mean_dist,max_dist\n"
+            )
+        self._motion_log_path = os.path.join(save_dir, "dynamic_motion_feedback_stats.csv")
+        self._ba_edge_log_path = os.path.join(save_dir, "dynamic_ba_edge_stats.csv")
+        self.cfg["_dynamic_ba_edge_log_path"] = self._ba_edge_log_path
+        with open(self._motion_log_path, "w", encoding="utf-8") as f:
+            f.write(
+                "source_kf,target_kf,n_predictions,n_written,mask_pixels,coverage,"
+                "flow_mean_px,flow_max_px,prior_mean_m,prior_max_m,applied\n"
+            )
+        with open(self._ba_edge_log_path, "w", encoding="utf-8") as f:
+            f.write(
+                "update_id,tag,n_edges,n_adjacent_forward,n_adjacent_with_mask,"
+                "total_mask_pixels,mean_mask_pixels,mean_edge_weight\n"
+            )
 
         import matplotlib
         matplotlib.use("Agg")
@@ -584,7 +605,7 @@ class OnlineDynamicPredictor:
 
         # ---- 提取动态像素 ----
         depth = np.where(disp > 1e-6, 1.0 / disp, 0.0)
-        dyn_mask = (uncer > self.uncer_thresh) & (depth > 0.0)
+        dyn_mask = self._select_dynamic_mask(uncer, depth)
 
         if dyn_mask.sum() == 0:
             pts_world = np.zeros((0, 3))
@@ -599,7 +620,7 @@ class OnlineDynamicPredictor:
             pts_world = self._cam_to_world(pts_cam, pose_7)
 
         # ---- 跨帧最近邻 ID 匹配 ----
-        pids = self._assign_ids(pts_world)
+        pids = self._assign_ids(pts_world, kf_idx=kf_idx)
 
         # ---- 喂给 Kalman 滑动窗口 ----
         self._predictor.add_frame(pts_world, pids)
@@ -639,13 +660,21 @@ class OnlineDynamicPredictor:
         if not hasattr(video, "uncertainties") or not self._pending_predictions:
             return False
 
+        source_kf_idx = int(self._pending_motion.get("source_kf_idx", -1))
+        if source_kf_idx < 0 or kf_idx != source_kf_idx + 1:
+            return False
+
+        feedback_pair = (source_kf_idx, int(kf_idx))
+        if feedback_pair in self._applied_feedback_pairs:
+            return False
+
         with video.get_lock():
             H_l, W_l = video.uncertainties[kf_idx].shape
 
         if self.motion_comp_ba:
             self._write_motion_compensation(video, kf_idx, H_l, W_l)
 
-        return self._feedback_to_video(
+        applied = self._feedback_to_video(
             video,
             kf_idx,
             self._pending_predictions,
@@ -657,6 +686,8 @@ class OnlineDynamicPredictor:
             max_feedback_points=self.max_feedback_points,
             max_feedback_coverage=self.max_feedback_coverage,
         )
+        self._applied_feedback_pairs.add(feedback_pair)
+        return applied
 
     def _write_motion_compensation(self, video, target_kf_idx: int, H_l: int, W_l: int) -> bool:
         """Write predicted dynamic 3D motion priors for adjacent BA edges."""
@@ -668,6 +699,7 @@ class OnlineDynamicPredictor:
 
         source_kf_idx = int(self._pending_motion.get("source_kf_idx", -1))
         if source_kf_idx < 0 or target_kf_idx != source_kf_idx + 1:
+            self._write_motion_stat(source_kf_idx, target_kf_idx, 0, 0, 0, H_l * W_l, 0, 0, 0, 0, False)
             return False
 
         pids = self._pending_motion["pids"]
@@ -675,6 +707,7 @@ class OnlineDynamicPredictor:
         points_world = self._pending_motion["points_world"]
         predictions = self._pending_motion["predictions"]
         if len(pids) == 0:
+            self._write_motion_stat(source_kf_idx, target_kf_idx, 0, 0, 0, H_l * W_l, 0, 0, 0, 0, False)
             return False
 
         with video.get_lock():
@@ -688,6 +721,10 @@ class OnlineDynamicPredictor:
 
         flow = np.zeros((H_l, W_l, 2), dtype=np.float32)
         weight = np.zeros((H_l, W_l), dtype=np.float32)
+        prior = np.zeros((H_l, W_l, 3), dtype=np.float32)
+        mask3 = np.zeros((H_l, W_l), dtype=np.float32)
+        flow_mags = []
+        prior_mags = []
 
         def project(pt_w):
             pt_w = np.asarray(pt_w, dtype=float).reshape(1, 3)
@@ -725,13 +762,23 @@ class OnlineDynamicPredictor:
                 continue
             flow[v0:v1, u0:u1] = delta[None, None, :]
             weight[v0:v1, u0:u1] = max(weight[v0:v1, u0:u1].max(), float(self.motion_comp_weight))
+            pt_w = points_world[idx]
+            pred_w = np.asarray(steps[0], dtype=float)
+            motion_cam = (R_cw @ (pred_w - pt_w).reshape(3, 1)).reshape(3)
+            prior[v0:v1, u0:u1] = motion_cam[None, None, :]
+            mask3[v0:v1, u0:u1] = float(self.motion_comp_weight)
+            flow_mags.append(float(np.linalg.norm(delta)))
+            prior_mags.append(float(np.linalg.norm(motion_cam)))
             n_written += 1
 
         if n_written == 0:
+            self._write_motion_stat(source_kf_idx, target_kf_idx, len(predictions), 0, 0, H_l * W_l, 0, 0, 0, 0, False)
             return False
 
         flow_t = torch.from_numpy(flow).to(video.dynamic_motion_flow.device)
         weight_t = torch.from_numpy(weight).to(video.dynamic_motion_weight.device)
+        prior_t = torch.from_numpy(prior).to(video.dynamic_motion_priors.device)
+        mask_t = torch.from_numpy(mask3).to(video.dynamic_motion_masks.device)
         with video.get_lock():
             video.dynamic_motion_flow[source_kf_idx].zero_()
             video.dynamic_motion_weight[source_kf_idx].zero_()
@@ -740,29 +787,55 @@ class OnlineDynamicPredictor:
             video.dynamic_motion_masks[source_kf_idx].zero_()
             video.dynamic_motion_flow[source_kf_idx] = flow_t
             video.dynamic_motion_weight[source_kf_idx] = weight_t
-            prior = np.zeros((H_l, W_l, 3), dtype=np.float32)
-            mask3 = np.zeros((H_l, W_l), dtype=np.float32)
-            for pid, steps in predictions.items():
-                idx = pid_to_idx.get(int(pid))
-                if idx is None or not steps:
-                    continue
-                pt_w = points_world[idx]
-                pred_w = np.asarray(steps[0], dtype=float)
-                motion_cam = (R_cw @ (pred_w - pt_w).reshape(3, 1)).reshape(3)
-                ui, vi = int(round(pixels[idx, 0])), int(round(pixels[idx, 1]))
-                r = int(self.motion_comp_radius)
-                u0 = max(ui - r, 0); u1 = min(ui + r + 1, W_l)
-                v0 = max(vi - r, 0); v1 = min(vi + r + 1, H_l)
-                if u1 <= u0 or v1 <= v0:
-                    continue
-                prior[v0:v1, u0:u1] = motion_cam[None, None, :]
-                mask3[v0:v1, u0:u1] = float(self.motion_comp_weight)
-            prior_t = torch.from_numpy(prior).to(video.dynamic_motion_priors.device)
-            mask_t = torch.from_numpy(mask3).to(video.dynamic_motion_masks.device)
             video.dynamic_motions[source_kf_idx] = prior_t
             video.dynamic_motion_priors[source_kf_idx] = prior_t
             video.dynamic_motion_masks[source_kf_idx] = mask_t
+        mask_pixels = int((mask3 > 0).sum())
+        flow_arr = np.asarray(flow_mags, dtype=np.float32)
+        prior_arr = np.asarray(prior_mags, dtype=np.float32)
+        self._write_motion_stat(
+            source_kf_idx,
+            target_kf_idx,
+            len(predictions),
+            n_written,
+            mask_pixels,
+            H_l * W_l,
+            float(flow_arr.mean()) if flow_arr.size else 0.0,
+            float(flow_arr.max()) if flow_arr.size else 0.0,
+            float(prior_arr.mean()) if prior_arr.size else 0.0,
+            float(prior_arr.max()) if prior_arr.size else 0.0,
+            True,
+        )
         return True
+
+    def _select_dynamic_mask(self, uncer, depth):
+        """Select dynamic candidates from uncertainty, keeping enough points for 4D motion."""
+        import numpy as np
+
+        valid = depth > 0.0
+        dyn_mask = (uncer > self.uncer_thresh) & valid
+        valid_count = int(valid.sum())
+
+        if valid_count == 0:
+            return dyn_mask
+
+        min_points = max(0, self.min_dynamic_points)
+        if min_points > 0 and int(dyn_mask.sum()) < min_points:
+            k = min(min_points, valid_count)
+            valid_scores = uncer[valid]
+            kth = np.partition(valid_scores, -k)[-k]
+            dyn_mask = valid & (uncer >= kth)
+
+        max_points = max(0, self.max_dynamic_points)
+        if max_points > 0 and int(dyn_mask.sum()) > max_points:
+            flat = np.flatnonzero(dyn_mask.reshape(-1))
+            scores = uncer.reshape(-1)[flat]
+            keep = flat[np.argpartition(scores, -max_points)[-max_points:]]
+            limited = np.zeros(dyn_mask.size, dtype=bool)
+            limited[keep] = True
+            dyn_mask = limited.reshape(dyn_mask.shape)
+
+        return dyn_mask
 
     def finalize(self, gif_name: str = "dynamic_prediction_online.gif") -> str:
         """SLAM 结束后调用，合成 GIF（插入原始帧使播放流畅）并生成关键帧图片。"""
@@ -899,7 +972,6 @@ class OnlineDynamicPredictor:
             step = max(1, len(pred_items) // max_feedback_points)
             pred_items = pred_items[::step][:max_feedback_points]
 
-        pred_mask = np.zeros((H_l, W_l), dtype=bool)
         for pid, steps in pred_items:
             if not steps:
                 continue
@@ -918,13 +990,36 @@ class OnlineDynamicPredictor:
             projected_centers.append((ui, vi))
 
         n_projected = len(projected_centers)
-        for ui, vi in projected_centers:
-            # splat：以预测落点为中心扩散 splat_radius 像素
-            r = splat_radius
-            u0 = max(ui - r, 0); u1 = min(ui + r + 1, W_l)
-            v0 = max(vi - r, 0); v1 = min(vi + r + 1, H_l)
-            if u1 > u0 and v1 > v0:
-                pred_mask[v0:v1, u0:u1] = True
+
+        def build_mask(centers, radius):
+            mask = np.zeros((H_l, W_l), dtype=bool)
+            for ui, vi in centers:
+                u0 = max(ui - radius, 0); u1 = min(ui + radius + 1, W_l)
+                v0 = max(vi - radius, 0); v1 = min(vi + radius + 1, H_l)
+                if u1 > u0 and v1 > v0:
+                    mask[v0:v1, u0:u1] = True
+            return mask
+
+        pred_mask = np.zeros((H_l, W_l), dtype=bool)
+        if projected_centers:
+            pred_mask = build_mask(projected_centers, int(splat_radius))
+
+        total_pixels = max(H_l * W_l, 1)
+        if max_feedback_coverage and pred_mask.any():
+            max_pixels = max(1, int(max_feedback_coverage * total_pixels))
+            if int(pred_mask.sum()) > max_pixels:
+                # Prefer reducing splat radius over dropping predictions.
+                for radius in range(int(splat_radius) - 1, -1, -1):
+                    candidate = build_mask(projected_centers, radius)
+                    if int(candidate.sum()) <= max_pixels:
+                        pred_mask = candidate
+                        break
+                else:
+                    # Even radius=0 is too dense; keep a deterministic subset.
+                    max_centers = min(len(projected_centers), max_pixels)
+                    step = max(1, int(np.ceil(len(projected_centers) / max_centers)))
+                    centers = projected_centers[::step][:max_centers]
+                    pred_mask = build_mask(centers, 0)
 
         if not pred_mask.any():
             self._write_feedback_stat(
@@ -934,13 +1029,6 @@ class OnlineDynamicPredictor:
             return False
 
         mask_pixels = int(pred_mask.sum())
-        coverage = mask_pixels / max(H_l * W_l, 1)
-        if max_feedback_coverage and coverage > max_feedback_coverage:
-            self._write_feedback_stat(
-                kf_idx, len(predictions), n_projected, mask_pixels, H_l * W_l,
-                0.0, 0.0, False,
-            )
-            return False
 
         # 转为 torch tensor，写回 video.uncertainties[kf_idx]
         pred_mask_t = torch.from_numpy(pred_mask).to(video.uncertainties.device)
@@ -986,32 +1074,103 @@ class OnlineDynamicPredictor:
                 f"{uncer_after_max:.6f},{int(applied)}\n"
             )
 
-    def _assign_ids(self, pts_world: "np.ndarray") -> "np.ndarray":
+    def _write_motion_stat(
+        self,
+        source_kf: int,
+        target_kf: int,
+        n_predictions: int,
+        n_written: int,
+        mask_pixels: int,
+        total_pixels: int,
+        flow_mean_px: float,
+        flow_max_px: float,
+        prior_mean_m: float,
+        prior_max_m: float,
+        applied: bool,
+    ) -> None:
+        coverage = mask_pixels / max(total_pixels, 1)
+        with open(self._motion_log_path, "a", encoding="utf-8") as f:
+            f.write(
+                f"{source_kf},{target_kf},{n_predictions},{n_written},"
+                f"{mask_pixels},{coverage:.8f},{flow_mean_px:.6f},{flow_max_px:.6f},"
+                f"{prior_mean_m:.6f},{prior_max_m:.6f},{int(applied)}\n"
+            )
+
+    def _assign_ids(self, pts_world: "np.ndarray", kf_idx: int = -1) -> "np.ndarray":
         import numpy as np
         N = len(pts_world)
         if N == 0:
+            self._write_id_stat(kf_idx, 0, 0, 0, 0, [])
             return np.zeros(0, dtype=int)
 
         if self._prev_pts is None or len(self._prev_pts) == 0:
             ids = np.arange(self._next_id, self._next_id + N, dtype=int)
             self._next_id += N
+            matched_dists = []
+            n_matched = 0
         else:
             ids = np.full(N, -1, dtype=int)
             diff = pts_world[:, None, :] - self._prev_pts[None, :, :]
             dist = np.linalg.norm(diff, axis=-1)           # [N, M]
-            nearest_idx  = dist.argmin(axis=1)
-            nearest_dist = dist[np.arange(N), nearest_idx]
-            matched = nearest_dist < self.match_radius
-            ids[matched] = self._prev_ids[nearest_idx[matched]]
-            n_new = (~matched).sum()
+
+            cand_i, cand_j = np.where(dist < self.match_radius)
+            if len(cand_i) > 0:
+                order = np.argsort(dist[cand_i, cand_j])
+                used_cur = np.zeros(N, dtype=bool)
+                used_prev = np.zeros(len(self._prev_pts), dtype=bool)
+                matched_dists = []
+                for idx in order:
+                    i = int(cand_i[idx])
+                    j = int(cand_j[idx])
+                    if used_cur[i] or used_prev[j]:
+                        continue
+                    ids[i] = self._prev_ids[j]
+                    used_cur[i] = True
+                    used_prev[j] = True
+                    matched_dists.append(float(dist[i, j]))
+            else:
+                matched_dists = []
+
+            n_matched = int((ids >= 0).sum())
+            n_new = int((ids < 0).sum())
             if n_new > 0:
-                ids[~matched] = np.arange(self._next_id,
-                                           self._next_id + n_new, dtype=int)
+                ids[ids < 0] = np.arange(self._next_id,
+                                          self._next_id + n_new, dtype=int)
                 self._next_id += n_new
 
         self._prev_pts = pts_world.copy()
         self._prev_ids = ids.copy()
+        self._write_id_stat(
+            kf_idx,
+            N,
+            n_matched,
+            N - n_matched,
+            len(np.unique(ids)),
+            matched_dists,
+        )
         return ids
+
+    def _write_id_stat(
+        self,
+        kf_idx: int,
+        n_points: int,
+        n_matched: int,
+        n_new: int,
+        n_unique_ids: int,
+        matched_dists,
+    ) -> None:
+        import numpy as np
+
+        d = np.asarray(matched_dists, dtype=np.float32)
+        match_ratio = n_matched / max(n_points, 1)
+        min_dist = float(d.min()) if d.size else 0.0
+        mean_dist = float(d.mean()) if d.size else 0.0
+        max_dist = float(d.max()) if d.size else 0.0
+        with open(self._id_log_path, "a", encoding="utf-8") as f:
+            f.write(
+                f"{kf_idx},{n_points},{n_matched},{n_new},{n_unique_ids},"
+                f"{match_ratio:.8f},{min_dist:.6f},{mean_dist:.6f},{max_dist:.6f}\n"
+            )
 
     @staticmethod
     def _cam_to_world(pts_cam: "np.ndarray", pose_7: "np.ndarray") -> "np.ndarray":
