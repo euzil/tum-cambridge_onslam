@@ -709,13 +709,17 @@ gain = +1.39%
    - 引入多帧 tracklet smoothing
 5. 如果点云闪烁明显，下一步应做 object-centric temporal fusion，把同一 object track 的多帧点云按 object motion 对齐后融合。
    
-python scripts_eval/export_4d_model.py ^
-  --video-npz Outputs/Bonn/bonn_balloon/video.npz ^
-  --output-dir Outputs/Bonn/bonn_balloon/4d_model ^
-  --disp-source up ^
-  --max-depth 12 ^
-  --stride 1 ^
-  --max-points-per-frame 0 ^
-  --static-voxel-size 0.02 ^
-  --static-min-obs 2 ^
-  --static-max-color-std 0.25
+addpath('scripts_eval')
+stats = build_global_slam_from_4d_matlab( ...
+    'Outputs/Bonn/bonn_balloon/4d_model/model_4d.mat', ...
+    'Outputs/Bonn/bonn_balloon/slam_global', ...
+    0.02, 3, 0.20, 'flip_z', true);
+
+view_static_env_dynamic_timeline_matlab('Outputs/Bonn/bonn_balloon/slam_global', 2, 8)
+
+view_static_env_dynamic_timeline_matlab( ...
+    'Outputs/Bonn/bonn_balloon/slam_global', ...
+    2, ...   % 静态点大小
+    2, ...   % 动态点大小
+    'Outputs/Bonn/bonn_balloon/4d_model/model_4d.mat', ...
+    2);     % 预测点大小
