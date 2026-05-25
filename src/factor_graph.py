@@ -268,6 +268,8 @@ class FactorGraph:
             else:
                 ii, jj, target, weight = self.ii, self.jj, self.target, self.weight
 
+            target = self.video.apply_dynamic_motion_compensation(target, ii, jj)
+
             damping = .2 * self.damping[torch.unique(ii)].contiguous() + EP     # damping factor: avoid singlevalue tensor
 
             # bundle adjustment
@@ -326,6 +328,7 @@ class FactorGraph:
 
             target = self.target
             weight = self.weight
+            target = self.video.apply_dynamic_motion_compensation(target, self.ii, self.jj)
 
             # dense bundle adjustment            
             self.video.ba(target, weight, damping, self.ii, self.jj, t0, t1, 

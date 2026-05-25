@@ -190,6 +190,9 @@ __global__ void projective_transform_kernel(
     const torch::PackedTensorAccessor32<float,3,torch::RestrictPtrTraits> uncertainties,
     const torch::PackedTensorAccessor32<float,2,torch::RestrictPtrTraits> poses,
     const torch::PackedTensorAccessor32<float,3,torch::RestrictPtrTraits> disps,
+    const torch::PackedTensorAccessor32<float,4,torch::RestrictPtrTraits> dynamic_motions,
+    const torch::PackedTensorAccessor32<float,4,torch::RestrictPtrTraits> dynamic_motion_priors,
+    const torch::PackedTensorAccessor32<float,3,torch::RestrictPtrTraits> dynamic_motion_masks,
     const torch::PackedTensorAccessor32<float,1,torch::RestrictPtrTraits> intrinsics,
     const torch::PackedTensorAccessor32<long,1,torch::RestrictPtrTraits> ii,
     const torch::PackedTensorAccessor32<long,1,torch::RestrictPtrTraits> jj,
@@ -200,7 +203,8 @@ __global__ void projective_transform_kernel(
     torch::PackedTensorAccessor32<float,2,torch::RestrictPtrTraits> Cii,
     torch::PackedTensorAccessor32<float,2,torch::RestrictPtrTraits> bz,
     const bool enable_udba,
-    const bool enable_bidirectional_uncer)
+    const bool enable_bidirectional_uncer,
+    const bool enable_dynamic_motion)
 {
   const int block_id = blockIdx.x;        // every block handles one edge
   const int thread_id = threadIdx.x;      // every thread handles one pixel
@@ -309,6 +313,16 @@ __global__ void projective_transform_kernel(
     // transform homogenous point
     actSE3(tij, qij, Xi, Xj);   // frame i to frame j  Xj = (R * Xi * 1/h) + t = 1/h * (R * Xi + h * t)
     // h * Xj = R * Xi + h * t => final we get h * Xj
+
+    const bool has_dynamic_motion = enable_dynamic_motion && jx == ix + 1 && dynamic_motion_masks[ix][i][j] > 0.0f;
+    if (has_dynamic_motion) {
+      const float mw = dynamic_motion_masks[ix][i][j];
+      if (mw > 0.0f) {
+        Xj[0] += Xi[3] * dynamic_motions[ix][i][j][0];
+        Xj[1] += Xi[3] * dynamic_motions[ix][i][j][1];
+        Xj[2] += Xi[3] * dynamic_motions[ix][i][j][2];
+      }
+    }
 
     const float x = Xj[0];
     const float y = Xj[1];
@@ -999,6 +1013,118 @@ __global__ void disp_retr_kernel(
   for (int k=threadIdx.x; k<ht*wd; k+=blockDim.x) {
     float d = disps[i][k/wd][k%wd] + dz[blockIdx.x][k];
     disps[i][k/wd][k%wd] = d;
+  }
+}
+
+__global__ void dynamic_motion_accum_kernel(
+    const torch::PackedTensorAccessor32<float,4,torch::RestrictPtrTraits> target,
+    const torch::PackedTensorAccessor32<float,4,torch::RestrictPtrTraits> weight,
+    const torch::PackedTensorAccessor32<float,2,torch::RestrictPtrTraits> poses,
+    const torch::PackedTensorAccessor32<float,3,torch::RestrictPtrTraits> disps,
+    const torch::PackedTensorAccessor32<float,4,torch::RestrictPtrTraits> dynamic_motions,
+    const torch::PackedTensorAccessor32<float,3,torch::RestrictPtrTraits> dynamic_motion_masks,
+    const torch::PackedTensorAccessor32<float,1,torch::RestrictPtrTraits> intrinsics,
+    const torch::PackedTensorAccessor32<long,1,torch::RestrictPtrTraits> ii,
+    const torch::PackedTensorAccessor32<long,1,torch::RestrictPtrTraits> jj,
+    torch::PackedTensorAccessor32<float,4,torch::RestrictPtrTraits> dm_num,
+    torch::PackedTensorAccessor32<float,4,torch::RestrictPtrTraits> dm_den)
+{
+  const int block_id = blockIdx.x;
+  const int ht = disps.size(1);
+  const int wd = disps.size(2);
+
+  int ix = static_cast<int>(ii[block_id]);
+  int jx = static_cast<int>(jj[block_id]);
+  if (jx != ix + 1) return;
+
+  __shared__ float fx, fy, cx, cy;
+  __shared__ float ti[3], tj[3], tij[3];
+  __shared__ float qi[4], qj[4], qij[4];
+
+  if (threadIdx.x == 0) {
+    fx = intrinsics[0]; fy = intrinsics[1]; cx = intrinsics[2]; cy = intrinsics[3];
+  }
+  if (threadIdx.x < 3) {
+    ti[threadIdx.x] = poses[ix][threadIdx.x];
+    tj[threadIdx.x] = poses[jx][threadIdx.x];
+  }
+  if (threadIdx.x < 4) {
+    qi[threadIdx.x] = poses[ix][threadIdx.x+3];
+    qj[threadIdx.x] = poses[jx][threadIdx.x+3];
+  }
+  __syncthreads();
+  if (threadIdx.x == 0) relSE3(ti, qi, tj, qj, tij, qij);
+  __syncthreads();
+
+  GPU_1D_KERNEL_LOOP(k, ht*wd) {
+    const int i = k / wd;
+    const int j = k % wd;
+    const float mw = dynamic_motion_masks[ix][i][j];
+    if (mw <= 0.0f) continue;
+
+    const float u = static_cast<float>(j);
+    const float v = static_cast<float>(i);
+    float Xi[4], Xj[4];
+    Xi[0] = (u - cx) / fx;
+    Xi[1] = (v - cy) / fy;
+    Xi[2] = 1;
+    Xi[3] = disps[ix][i][j];
+
+    actSE3(tij, qij, Xi, Xj);
+    Xj[0] += Xi[3] * dynamic_motions[ix][i][j][0];
+    Xj[1] += Xi[3] * dynamic_motions[ix][i][j][1];
+    Xj[2] += Xi[3] * dynamic_motions[ix][i][j][2];
+
+    if (Xj[2] < MIN_DEPTH) continue;
+    const float x = Xj[0];
+    const float y = Xj[1];
+    const float h = Xi[3];
+    const float d = 1.0f / Xj[2];
+    const float d2 = d * d;
+
+    const float ru = target[block_id][0][i][j] - (fx * d * x + cx);
+    const float rv = target[block_id][1][i][j] - (fy * d * y + cy);
+    const float wu = .001f * weight[block_id][0][i][j];
+    const float wv = .001f * weight[block_id][1][i][j];
+
+    const float Ju[3] = {fx * h * d, 0.0f, -fx * x * h * d2};
+    const float Jv[3] = {0.0f, fy * h * d, -fy * y * h * d2};
+    for (int c=0; c<3; c++) {
+      atomicAdd(&dm_num[ix][i][j][c], wu * Ju[c] * ru + wv * Jv[c] * rv);
+      atomicAdd(&dm_den[ix][i][j][c], wu * Ju[c] * Ju[c] + wv * Jv[c] * Jv[c]);
+    }
+  }
+}
+
+__global__ void dynamic_motion_retr_kernel(
+    torch::PackedTensorAccessor32<float,4,torch::RestrictPtrTraits> dynamic_motions,
+    const torch::PackedTensorAccessor32<float,4,torch::RestrictPtrTraits> dynamic_motion_priors,
+    const torch::PackedTensorAccessor32<float,3,torch::RestrictPtrTraits> dynamic_motion_masks,
+    const torch::PackedTensorAccessor32<float,4,torch::RestrictPtrTraits> dm_num,
+    const torch::PackedTensorAccessor32<float,4,torch::RestrictPtrTraits> dm_den,
+    const torch::PackedTensorAccessor32<long,1,torch::RestrictPtrTraits> kx,
+    const float prior_weight,
+    const float lr,
+    const float damping)
+{
+  const int block_id = blockIdx.x;
+  const int idx = static_cast<int>(kx[block_id]);
+  const int ht = dynamic_motions.size(1);
+  const int wd = dynamic_motions.size(2);
+
+  GPU_1D_KERNEL_LOOP(k, ht*wd) {
+    const int i = k / wd;
+    const int j = k % wd;
+    const float mw = dynamic_motion_masks[idx][i][j];
+    if (mw <= 0.0f) continue;
+
+    for (int c=0; c<3; c++) {
+      const float prior = dynamic_motion_priors[idx][i][j][c];
+      const float cur = dynamic_motions[idx][i][j][c];
+      const float num = dm_num[idx][i][j][c] + prior_weight * mw * (prior - cur);
+      const float den = dm_den[idx][i][j][c] + prior_weight * mw + damping;
+      dynamic_motions[idx][i][j][c] = cur + lr * num / den;
+    }
   }
 }
 
@@ -1765,6 +1891,9 @@ std::vector<torch::Tensor> ba_cuda(
     torch::Tensor disps,        // [buffer, height, width]
     torch::Tensor intrinsics,
     torch::Tensor disps_sens,
+    torch::Tensor dynamic_motions,
+    torch::Tensor dynamic_motion_priors,
+    torch::Tensor dynamic_motion_masks,
     torch::Tensor targets,
     torch::Tensor weights,
     torch::Tensor uncertainties,
@@ -1790,6 +1919,10 @@ std::vector<torch::Tensor> ba_cuda(
     const bool enable_udba,
     const bool enable_affine_transform,
     const bool enable_bidirectional_uncer,
+    const bool enable_dynamic_motion,
+    const float dynamic_motion_prior_weight,
+    const float dynamic_motion_lr,
+    const float dynamic_motion_damping,
     const bool debug)
 {
   auto opts = poses.options();
@@ -1820,6 +1953,8 @@ std::vector<torch::Tensor> ba_cuda(
   torch::Tensor Eij = torch::zeros({num, 6, ht*wd}, opts);  // Jacobian of residual w.r.t. pose j
   torch::Tensor Cii = torch::zeros({num, ht*wd}, opts);     // per-pixel squared error
   torch::Tensor wi = torch::zeros({num, ht*wd}, opts);      // per-pixel weights
+  torch::Tensor dm_num = torch::zeros({poses.size(0), ht, wd, 3}, opts);
+  torch::Tensor dm_den = torch::zeros({poses.size(0), ht, wd, 3}, opts);
 
   torch::Tensor Jii_data = torch::zeros({num, ht*wd}, opts);
   torch::Tensor Jjj_data = torch::zeros({num, ht*wd}, opts);
@@ -1841,6 +1976,9 @@ std::vector<torch::Tensor> ba_cuda(
       uncertainties.packed_accessor32<float,3,torch::RestrictPtrTraits>(),
       poses.packed_accessor32<float,2,torch::RestrictPtrTraits>(),
       disps.packed_accessor32<float,3,torch::RestrictPtrTraits>(),
+      dynamic_motions.packed_accessor32<float,4,torch::RestrictPtrTraits>(),
+      dynamic_motion_priors.packed_accessor32<float,4,torch::RestrictPtrTraits>(),
+      dynamic_motion_masks.packed_accessor32<float,3,torch::RestrictPtrTraits>(),
       intrinsics.packed_accessor32<float,1,torch::RestrictPtrTraits>(),
       ii.packed_accessor32<long,1,torch::RestrictPtrTraits>(),
       jj.packed_accessor32<long,1,torch::RestrictPtrTraits>(),
@@ -1851,7 +1989,8 @@ std::vector<torch::Tensor> ba_cuda(
       Cii.packed_accessor32<float,2,torch::RestrictPtrTraits>(),
       wi.packed_accessor32<float,2,torch::RestrictPtrTraits>(),
       enable_udba,
-      enable_bidirectional_uncer);
+      enable_bidirectional_uncer,
+      enable_dynamic_motion);
 
 
     // pose x pose block
@@ -1910,6 +2049,33 @@ std::vector<torch::Tensor> ba_cuda(
         disps.packed_accessor32<float,3,torch::RestrictPtrTraits>(),
         dz.packed_accessor32<float,2,torch::RestrictPtrTraits>(),
         kx.packed_accessor32<long,1,torch::RestrictPtrTraits>());         // index of the keyframes
+
+      if (enable_dynamic_motion) {
+        dm_num.zero_();
+        dm_den.zero_();
+        dynamic_motion_accum_kernel<<<num, THREADS>>>(
+          targets.packed_accessor32<float,4,torch::RestrictPtrTraits>(),
+          weights.packed_accessor32<float,4,torch::RestrictPtrTraits>(),
+          poses.packed_accessor32<float,2,torch::RestrictPtrTraits>(),
+          disps.packed_accessor32<float,3,torch::RestrictPtrTraits>(),
+          dynamic_motions.packed_accessor32<float,4,torch::RestrictPtrTraits>(),
+          dynamic_motion_masks.packed_accessor32<float,3,torch::RestrictPtrTraits>(),
+          intrinsics.packed_accessor32<float,1,torch::RestrictPtrTraits>(),
+          ii.packed_accessor32<long,1,torch::RestrictPtrTraits>(),
+          jj.packed_accessor32<long,1,torch::RestrictPtrTraits>(),
+          dm_num.packed_accessor32<float,4,torch::RestrictPtrTraits>(),
+          dm_den.packed_accessor32<float,4,torch::RestrictPtrTraits>());
+        dynamic_motion_retr_kernel<<<kx.size(0), THREADS>>>(
+          dynamic_motions.packed_accessor32<float,4,torch::RestrictPtrTraits>(),
+          dynamic_motion_priors.packed_accessor32<float,4,torch::RestrictPtrTraits>(),
+          dynamic_motion_masks.packed_accessor32<float,3,torch::RestrictPtrTraits>(),
+          dm_num.packed_accessor32<float,4,torch::RestrictPtrTraits>(),
+          dm_den.packed_accessor32<float,4,torch::RestrictPtrTraits>(),
+          kx.packed_accessor32<long,1,torch::RestrictPtrTraits>(),
+          dynamic_motion_prior_weight,
+          dynamic_motion_lr,
+          dynamic_motion_damping);
+      }
     }
 
     if (enable_update_uncer)

@@ -59,6 +59,9 @@ std::vector<torch::Tensor> ba_cuda(
     torch::Tensor disps,
     torch::Tensor intrinsics,
     torch::Tensor disps_sens,
+    torch::Tensor dynamic_motions,
+    torch::Tensor dynamic_motion_priors,
+    torch::Tensor dynamic_motion_masks,
     torch::Tensor targets,
     torch::Tensor weights,
     torch::Tensor uncertainties,
@@ -84,6 +87,10 @@ std::vector<torch::Tensor> ba_cuda(
     const bool enable_udba,
     const bool enable_affine_transform,
     const bool enable_bidirectional_uncer,
+    const bool enable_dynamic_motion,
+    const float dynamic_motion_prior_weight,
+    const float dynamic_motion_lr,
+    const float dynamic_motion_damping,
     const bool debug);
 
 std::vector<torch::Tensor> corr_index_cuda_forward(
@@ -120,6 +127,9 @@ std::vector<torch::Tensor> ba(
     torch::Tensor disps,
     torch::Tensor intrinsics,
     torch::Tensor disps_sens,
+    torch::Tensor dynamic_motions,
+    torch::Tensor dynamic_motion_priors,
+    torch::Tensor dynamic_motion_masks,
     torch::Tensor targets,
     torch::Tensor weights,
     torch::Tensor uncertainties,
@@ -145,6 +155,10 @@ std::vector<torch::Tensor> ba(
     const bool enable_udba,
     const bool enable_affine_transform,
     const bool enable_bidirectional_uncer,
+    const bool enable_dynamic_motion,
+    const float dynamic_motion_prior_weight,
+    const float dynamic_motion_lr,
+    const float dynamic_motion_damping,
     const bool debug) {
 
   CHECK_INPUT(targets);
@@ -157,12 +171,17 @@ std::vector<torch::Tensor> ba(
   CHECK_INPUT(disps);
   CHECK_INPUT(intrinsics);
   CHECK_INPUT(disps_sens);
+  CHECK_INPUT(dynamic_motions);
+  CHECK_INPUT(dynamic_motion_priors);
+  CHECK_INPUT(dynamic_motion_masks);
   CHECK_INPUT(ii);
   CHECK_INPUT(jj);
 
-  return ba_cuda(poses, disps, intrinsics, disps_sens, targets, weights, uncertainties, temp_y_cdot, dino_feats, affine_weights,
+  return ba_cuda(poses, disps, intrinsics, disps_sens, dynamic_motions, dynamic_motion_priors, dynamic_motion_masks,
+                 targets, weights, uncertainties, temp_y_cdot, dino_feats, affine_weights,
                  eta, ii, jj, t0, t1, iterations, lm, ep, gamma_data, gamma_prior, gamma_depth, lr, weight_decay, motion_only, depth_only, 
-                 enable_update_uncer, enable_udba, enable_affine_transform, enable_bidirectional_uncer, debug);
+                 enable_update_uncer, enable_udba, enable_affine_transform, enable_bidirectional_uncer,
+                 enable_dynamic_motion, dynamic_motion_prior_weight, dynamic_motion_lr, dynamic_motion_damping, debug);
 
 }
 

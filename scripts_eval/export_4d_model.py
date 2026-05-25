@@ -40,6 +40,12 @@ def load_video(video_npz: Path) -> dict[str, np.ndarray]:
         "intrinsics": np.asarray(data["intrinsics"], dtype=np.float32),
         "uncertainties": np.asarray(data["uncertainties"], dtype=np.float32),
         "timestamps": timestamps,
+        "dynamic_motions": np.asarray(data["dynamic_motions"], dtype=np.float32)
+        if "dynamic_motions" in data
+        else None,
+        "dynamic_motion_masks": np.asarray(data["dynamic_motion_masks"], dtype=np.float32)
+        if "dynamic_motion_masks" in data
+        else None,
     }
 
 
@@ -52,7 +58,7 @@ def frame_to_points(
     uncer_thresh: float,
     stride: int,
     max_depth: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Return world points, RGB colors, dynamic mask, and uncertainty values."""
     h_l, w_l = disp.shape
     _, h_img, w_img = image.shape
@@ -100,7 +106,8 @@ def frame_to_points(
     img_y = np.clip(np.round(ys_f * scale_y).astype(int), 0, h_img - 1)
     colors = np.clip(image.transpose(1, 2, 0)[img_y, img_x] * 255.0, 0, 255).astype(np.uint8)
 
-    return pts_world.astype(np.float32), colors, dynamic.astype(bool), uncer_f.astype(np.float32)
+    pixel_ij = np.stack([ys_f, xs_f], axis=-1).astype(np.int32)
+    return pts_world.astype(np.float32), colors, dynamic.astype(bool), uncer_f.astype(np.float32), pixel_ij, depth
 
 
 def limit_points(
@@ -108,11 +115,13 @@ def limit_points(
     colors: np.ndarray,
     dynamic: np.ndarray,
     uncertainty: np.ndarray,
+    pixel_ij: np.ndarray,
+    depth: np.ndarray,
     max_points: int,
     rng: np.random.Generator,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     if max_points <= 0 or len(points) <= max_points:
-        return points, colors, dynamic, uncertainty
+        return points, colors, dynamic, uncertainty, pixel_ij, depth
 
     dyn_idx = np.where(dynamic)[0]
     sta_idx = np.where(~dynamic)[0]
@@ -124,7 +133,7 @@ def limit_points(
         sta_idx = rng.choice(sta_idx, size=n_sta, replace=False)
     idx = np.concatenate([dyn_idx, sta_idx])
     idx.sort()
-    return points[idx], colors[idx], dynamic[idx], uncertainty[idx]
+    return points[idx], colors[idx], dynamic[idx], uncertainty[idx], pixel_ij[idx], depth[idx]
 
 
 def write_ply(
@@ -219,6 +228,9 @@ def save_matlab_model(
     frame_dynamic_counts: np.ndarray,
     poses: np.ndarray,
     intrinsics: np.ndarray,
+    motion_world: np.ndarray,
+    predicted_next_points: np.ndarray,
+    motion_valid: np.ndarray,
 ) -> None:
     """Save a MATLAB-friendly 4D model.
 
@@ -248,6 +260,9 @@ def save_matlab_model(
             "frame_dynamic_counts": frame_dynamic_counts.astype(np.int64).reshape(-1, 1),
             "poses_c2w": poses.astype(np.float32),
             "intrinsics": intrinsics.astype(np.float32),
+            "motion_world": motion_world.astype(np.float32),
+            "predicted_next_points": predicted_next_points.astype(np.float32),
+            "motion_valid": motion_valid.reshape(-1, 1),
         },
         do_compression=True,
     )
@@ -267,18 +282,23 @@ def export_4d_model(args: argparse.Namespace) -> None:
     intrinsics = video["intrinsics"]
     uncertainties = video["uncertainties"]
     timestamps = video["timestamps"]
+    dynamic_motions = video["dynamic_motions"]
+    dynamic_motion_masks = video["dynamic_motion_masks"]
 
     all_points = []
     all_colors = []
     all_dynamic = []
     all_uncertainty = []
+    all_motion_world = []
+    all_predicted_next = []
+    all_motion_valid = []
     all_time = []
     frame_offsets = [0]
     frame_counts = []
     frame_dynamic_counts = []
 
     for t in range(len(disps)):
-        pts, colors, dyn, uncer = frame_to_points(
+        pts, colors, dyn, uncer, pixel_ij, depth = frame_to_points(
             images[t],
             poses[t],
             disps[t],
@@ -288,9 +308,22 @@ def export_4d_model(args: argparse.Namespace) -> None:
             args.stride,
             args.max_depth,
         )
-        pts, colors, dyn, uncer = limit_points(
-            pts, colors, dyn, uncer, args.max_points_per_frame, rng
+        pts, colors, dyn, uncer, pixel_ij, depth = limit_points(
+            pts, colors, dyn, uncer, pixel_ij, depth, args.max_points_per_frame, rng
         )
+
+        motion_world = np.zeros_like(pts, dtype=np.float32)
+        motion_valid = np.zeros((len(pts),), dtype=bool)
+        if dynamic_motions is not None and dynamic_motion_masks is not None and t + 1 < len(poses):
+            yy = pixel_ij[:, 0]
+            xx = pixel_ij[:, 1]
+            mask_v = dynamic_motion_masks[t, yy, xx] > 0
+            if np.any(mask_v):
+                motion_cam = dynamic_motions[t, yy[mask_v], xx[mask_v]]
+                motion_world[mask_v] = (poses[t + 1][:3, :3] @ motion_cam.T).T
+                motion_valid[mask_v] = True
+                dyn = dyn | mask_v
+        predicted_next = pts + motion_world
 
         if args.write_ply:
             write_ply(
@@ -306,6 +339,9 @@ def export_4d_model(args: argparse.Namespace) -> None:
         all_colors.append(colors)
         all_dynamic.append(dyn)
         all_uncertainty.append(uncer)
+        all_motion_world.append(motion_world)
+        all_predicted_next.append(predicted_next)
+        all_motion_valid.append(motion_valid)
         all_time.append(np.full((len(pts),), float(timestamps[t]), dtype=np.float32))
         frame_counts.append(len(pts))
         frame_dynamic_counts.append(int(dyn.sum()))
@@ -325,6 +361,15 @@ def export_4d_model(args: argparse.Namespace) -> None:
     uncertainty = (
         np.concatenate(all_uncertainty, axis=0) if all_uncertainty else np.zeros((0,), dtype=np.float32)
     )
+    motion_world = (
+        np.concatenate(all_motion_world, axis=0) if all_motion_world else np.zeros((0, 3), dtype=np.float32)
+    )
+    predicted_next_points = (
+        np.concatenate(all_predicted_next, axis=0) if all_predicted_next else np.zeros((0, 3), dtype=np.float32)
+    )
+    motion_valid = (
+        np.concatenate(all_motion_valid, axis=0) if all_motion_valid else np.zeros((0,), dtype=bool)
+    )
     time = np.concatenate(all_time, axis=0) if all_time else np.zeros((0,), dtype=np.float32)
 
     frame_offsets_arr = np.asarray(frame_offsets, dtype=np.int64)
@@ -337,6 +382,9 @@ def export_4d_model(args: argparse.Namespace) -> None:
         colors=colors,
         dynamic=dynamic,
         uncertainty=uncertainty,
+        motion_world=motion_world,
+        predicted_next_points=predicted_next_points,
+        motion_valid=motion_valid,
         time=time,
         timestamps=timestamps,
         frame_offsets=frame_offsets_arr,
@@ -360,6 +408,9 @@ def export_4d_model(args: argparse.Namespace) -> None:
             frame_dynamic_counts_arr,
             poses,
             intrinsics,
+            motion_world,
+            predicted_next_points,
+            motion_valid,
         )
 
     track_stats = {"n_tracks": 0, "n_observations": 0}
@@ -376,6 +427,7 @@ def export_4d_model(args: argparse.Namespace) -> None:
         "n_frames": int(len(disps)),
         "n_points_total": int(len(points)),
         "n_dynamic_points_total": int(dynamic.sum()),
+        "n_motion_valid_points_total": int(motion_valid.sum()),
         "mean_points_per_frame": float(np.mean(frame_counts)) if frame_counts else 0.0,
         "mean_dynamic_per_frame": float(np.mean(frame_dynamic_counts)) if frame_dynamic_counts else 0.0,
         "uncer_thresh": args.uncer_thresh,

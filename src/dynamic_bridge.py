@@ -517,6 +517,10 @@ class OnlineDynamicPredictor:
         self.online_insert_raw_frames = dp_cfg.get("online_insert_raw_frames", False)
         self.max_feedback_points = dp_cfg.get("max_feedback_points", 200)
         self.max_feedback_coverage = dp_cfg.get("max_feedback_coverage", 0.08)
+        self.motion_comp_ba = dp_cfg.get("motion_comp_ba", False)
+        self.motion_comp_weight = dp_cfg.get("motion_comp_weight", 1.0)
+        self.motion_comp_radius = dp_cfg.get("motion_comp_radius", 1)
+        self.motion_comp_max_px = dp_cfg.get("motion_comp_max_px", 8.0)
 
         from dynamic_prediction.sliding_window import SlidingWindowPredictor
         self._predictor = SlidingWindowPredictor(
@@ -539,6 +543,7 @@ class OnlineDynamicPredictor:
         self._kf_count: int = 0
         self._next_kf_to_update: int = 0
         self._pending_predictions: dict = {}
+        self._pending_motion: dict = {}
         self._feedback_log_path = os.path.join(save_dir, "dynamic_feedback_stats.csv")
         if not os.path.exists(self._feedback_log_path):
             with open(self._feedback_log_path, "w", encoding="utf-8") as f:
@@ -583,11 +588,13 @@ class OnlineDynamicPredictor:
 
         if dyn_mask.sum() == 0:
             pts_world = np.zeros((0, 3))
+            pix_l = np.zeros((0, 2), dtype=float)
         else:
             fx, fy, cx, cy = intr
             v_g, u_g = np.meshgrid(np.arange(H_l, dtype=float),
                                     np.arange(W_l, dtype=float), indexing="ij")
             u = u_g[dyn_mask]; v = v_g[dyn_mask]; d = depth[dyn_mask]
+            pix_l = np.stack([u, v], axis=-1)
             pts_cam = np.stack([(u - cx)/fx*d, (v - cy)/fy*d, d], axis=-1)
             pts_world = self._cam_to_world(pts_cam, pose_7)
 
@@ -605,6 +612,13 @@ class OnlineDynamicPredictor:
         # 缓存给下一关键帧。下一帧刚 append 后、frontend BA 前写入，
         # 这样预测动态区域才会真正参与当前 SLAM 优化权重。
         self._pending_predictions = predictions
+        self._pending_motion = {
+            "source_kf_idx": int(kf_idx),
+            "pids": np.asarray(pids, dtype=int).copy(),
+            "pixels": np.asarray(pix_l, dtype=float).copy(),
+            "points_world": np.asarray(pts_world, dtype=float).copy(),
+            "predictions": predictions,
+        }
 
         if self.online_render:
             self._render_frame(
@@ -628,6 +642,9 @@ class OnlineDynamicPredictor:
         with video.get_lock():
             H_l, W_l = video.uncertainties[kf_idx].shape
 
+        if self.motion_comp_ba:
+            self._write_motion_compensation(video, kf_idx, H_l, W_l)
+
         return self._feedback_to_video(
             video,
             kf_idx,
@@ -640,6 +657,112 @@ class OnlineDynamicPredictor:
             max_feedback_points=self.max_feedback_points,
             max_feedback_coverage=self.max_feedback_coverage,
         )
+
+    def _write_motion_compensation(self, video, target_kf_idx: int, H_l: int, W_l: int) -> bool:
+        """Write predicted dynamic 3D motion priors for adjacent BA edges."""
+        if not self._pending_motion or not hasattr(video, "dynamic_motion_flow"):
+            return False
+
+        import torch
+        import numpy as np
+
+        source_kf_idx = int(self._pending_motion.get("source_kf_idx", -1))
+        if source_kf_idx < 0 or target_kf_idx != source_kf_idx + 1:
+            return False
+
+        pids = self._pending_motion["pids"]
+        pixels = self._pending_motion["pixels"]
+        points_world = self._pending_motion["points_world"]
+        predictions = self._pending_motion["predictions"]
+        if len(pids) == 0:
+            return False
+
+        with video.get_lock():
+            pose_7 = video.poses[target_kf_idx].cpu().numpy()
+            intr = video.intrinsics[target_kf_idx].cpu().numpy()
+
+        tx, ty, tz, qx, qy, qz, qw = pose_7
+        R_cw = _quat_to_rot(qx, qy, qz, qw)
+        t_cw = np.array([tx, ty, tz], dtype=float)
+        fx, fy, cx, cy = intr
+
+        flow = np.zeros((H_l, W_l, 2), dtype=np.float32)
+        weight = np.zeros((H_l, W_l), dtype=np.float32)
+
+        def project(pt_w):
+            pt_w = np.asarray(pt_w, dtype=float).reshape(1, 3)
+            pt_c = (R_cw @ pt_w.T).T + t_cw[None, :]
+            z = pt_c[0, 2]
+            if z <= 0.01:
+                return None
+            u = fx * pt_c[0, 0] / (z + 1e-8) + cx
+            v = fy * pt_c[0, 1] / (z + 1e-8) + cy
+            if not (0 <= u < W_l and 0 <= v < H_l):
+                return None
+            return np.array([u, v], dtype=np.float32)
+
+        pid_to_idx = {int(pid): idx for idx, pid in enumerate(pids)}
+        n_written = 0
+        for pid, steps in predictions.items():
+            idx = pid_to_idx.get(int(pid))
+            if idx is None or not steps:
+                continue
+            uv_static = project(points_world[idx])
+            uv_dynamic = project(steps[0])
+            if uv_static is None or uv_dynamic is None:
+                continue
+
+            delta = uv_dynamic - uv_static
+            mag = float(np.linalg.norm(delta))
+            if self.motion_comp_max_px > 0 and mag > self.motion_comp_max_px:
+                delta = delta * (self.motion_comp_max_px / max(mag, 1e-6))
+
+            ui, vi = int(round(pixels[idx, 0])), int(round(pixels[idx, 1]))
+            r = int(self.motion_comp_radius)
+            u0 = max(ui - r, 0); u1 = min(ui + r + 1, W_l)
+            v0 = max(vi - r, 0); v1 = min(vi + r + 1, H_l)
+            if u1 <= u0 or v1 <= v0:
+                continue
+            flow[v0:v1, u0:u1] = delta[None, None, :]
+            weight[v0:v1, u0:u1] = max(weight[v0:v1, u0:u1].max(), float(self.motion_comp_weight))
+            n_written += 1
+
+        if n_written == 0:
+            return False
+
+        flow_t = torch.from_numpy(flow).to(video.dynamic_motion_flow.device)
+        weight_t = torch.from_numpy(weight).to(video.dynamic_motion_weight.device)
+        with video.get_lock():
+            video.dynamic_motion_flow[source_kf_idx].zero_()
+            video.dynamic_motion_weight[source_kf_idx].zero_()
+            video.dynamic_motions[source_kf_idx].zero_()
+            video.dynamic_motion_priors[source_kf_idx].zero_()
+            video.dynamic_motion_masks[source_kf_idx].zero_()
+            video.dynamic_motion_flow[source_kf_idx] = flow_t
+            video.dynamic_motion_weight[source_kf_idx] = weight_t
+            prior = np.zeros((H_l, W_l, 3), dtype=np.float32)
+            mask3 = np.zeros((H_l, W_l), dtype=np.float32)
+            for pid, steps in predictions.items():
+                idx = pid_to_idx.get(int(pid))
+                if idx is None or not steps:
+                    continue
+                pt_w = points_world[idx]
+                pred_w = np.asarray(steps[0], dtype=float)
+                motion_cam = (R_cw @ (pred_w - pt_w).reshape(3, 1)).reshape(3)
+                ui, vi = int(round(pixels[idx, 0])), int(round(pixels[idx, 1]))
+                r = int(self.motion_comp_radius)
+                u0 = max(ui - r, 0); u1 = min(ui + r + 1, W_l)
+                v0 = max(vi - r, 0); v1 = min(vi + r + 1, H_l)
+                if u1 <= u0 or v1 <= v0:
+                    continue
+                prior[v0:v1, u0:u1] = motion_cam[None, None, :]
+                mask3[v0:v1, u0:u1] = float(self.motion_comp_weight)
+            prior_t = torch.from_numpy(prior).to(video.dynamic_motion_priors.device)
+            mask_t = torch.from_numpy(mask3).to(video.dynamic_motion_masks.device)
+            video.dynamic_motions[source_kf_idx] = prior_t
+            video.dynamic_motion_priors[source_kf_idx] = prior_t
+            video.dynamic_motion_masks[source_kf_idx] = mask_t
+        return True
 
     def finalize(self, gif_name: str = "dynamic_prediction_online.gif") -> str:
         """SLAM 结束后调用，合成 GIF（插入原始帧使播放流畅）并生成关键帧图片。"""

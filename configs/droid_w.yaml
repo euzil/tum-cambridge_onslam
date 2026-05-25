@@ -171,8 +171,8 @@ dynamic_prediction:
   online_insert_raw_frames: False  # True: GIF 中插入原始非关键帧，文件更大且播放更慢
 
   # 滑动窗口参数
-  window_size: 2            # 使用过去多少关键帧进行预测
-  predict_steps: 1          # 预测未来多少帧（通常 1-2）
+  window_size: 4            # 使用过去多少关键帧进行预测
+  predict_steps: 2          # 预测未来多少帧（通常 1-2）
 
   # Kalman Filter 参数
   process_noise: 0.1        # 过程噪声（越大越相信测量值）
@@ -191,5 +191,12 @@ dynamic_prediction:
   splat_radius: 1          # 越大覆盖范围越宽
   max_feedback_points: 120       # 最多反馈的预测点数，防止 dense mask 覆盖过大
   max_feedback_coverage: 0.05    # 单帧反馈 mask 最大覆盖率，超过则跳过该帧反馈
+  motion_comp_ba: True           # True: 在 CUDA BA 中启用独立动态点 3D motion variable
+  motion_comp_weight: 1.0        # 动态运动 prior/mask 的权重
+  motion_comp_radius: 1          # 源帧动态像素周围写入 motion prior 的低分辨率半径
+  motion_comp_max_px: 8.0        # 保留给旧 2D offset 调试路径的最大像素幅度
+  motion_comp_prior_weight: 0.1  # CUDA BA 中动态 motion variable 对预测 prior 的正则强度
+  motion_comp_lr: 0.5            # CUDA BA 中动态 motion variable 的每轮更新步长
+  motion_comp_damping: 0.001     # CUDA BA 中动态 motion variable 的阻尼
 
 dataset: 'tumrgbd'
