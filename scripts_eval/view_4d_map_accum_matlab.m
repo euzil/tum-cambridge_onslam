@@ -1,9 +1,10 @@
-function view_4d_map_accum_matlab(modelPath, windowSize, showDynamic, voxelSize)
+function view_4d_map_accum_matlab(modelPath, windowSize, showDynamic, voxelSize, axisMode)
 %VIEW_4D_MAP_ACCUM_MATLAB Visualize an accumulated 4D map in MATLAB.
 %
 % Usage:
 %   view_4d_map_accum_matlab('Outputs/Bonn/bonn_balloon/4d_model/model_4d.mat')
 %   view_4d_map_accum_matlab('Outputs/Bonn/bonn_balloon/4d_model/model_4d.mat', 53, false, 0.03)
+%   view_4d_map_accum_matlab('Outputs/Bonn/bonn_balloon/4d_model/model_4d.mat', 10, false, 0.03, 'swap_yz')
 %
 % Inputs:
 %   modelPath   : path to model_4d.mat (from export_4d_model.py)
@@ -19,6 +20,9 @@ if nargin < 3 || isempty(showDynamic)
 end
 if nargin < 4 || isempty(voxelSize)
     voxelSize = 0.03;
+end
+if nargin < 5 || isempty(axisMode)
+    axisMode = 'none';
 end
 
 S = load(modelPath);
@@ -43,6 +47,7 @@ for t = startFrame:nFrames
     end
 
     pts = double(S.points(lo:hi, :));
+    pts = apply_axis_mode(pts, axisMode);
     rgb = double(S.colors(lo:hi, :)) / 255.0;
     dyn = logical(S.dynamic(lo:hi));
 
@@ -107,4 +112,33 @@ function ptsOut = voxel_downsample_xyz(pts, voxel)
 ijk = floor(pts ./ voxel);
 [~, ia, ~] = unique(ijk, 'rows', 'stable');
 ptsOut = pts(ia, :);
+end
+
+function pts = apply_axis_mode(pts, mode)
+switch lower(string(mode))
+    case "none"
+        return;
+    case "swap_xy"
+        pts = pts(:, [2, 1, 3]);
+    case "swap_xz"
+        pts = pts(:, [3, 2, 1]);
+    case "swap_yz"
+        pts = pts(:, [1, 3, 2]);
+    case "flip_x"
+        pts(:, 1) = -pts(:, 1);
+    case "flip_y"
+        pts(:, 2) = -pts(:, 2);
+    case "flip_z"
+        pts(:, 3) = -pts(:, 3);
+    case "flip_xy"
+        pts(:, 1:2) = -pts(:, 1:2);
+    case "flip_xz"
+        pts(:, [1, 3]) = -pts(:, [1, 3]);
+    case "flip_yz"
+        pts(:, 2:3) = -pts(:, 2:3);
+    case "flip_xyz"
+        pts = -pts;
+    otherwise
+        error('Unknown axisMode: %s', mode);
+end
 end

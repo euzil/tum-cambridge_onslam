@@ -708,3 +708,14 @@ gain = +1.39%
    - 引入 3D IoU / Chamfer 距离
    - 引入多帧 tracklet smoothing
 5. 如果点云闪烁明显，下一步应做 object-centric temporal fusion，把同一 object track 的多帧点云按 object motion 对齐后融合。
+   
+python scripts_eval/export_4d_model.py ^
+  --video-npz Outputs/Bonn/bonn_balloon/video.npz ^
+  --output-dir Outputs/Bonn/bonn_balloon/4d_model ^
+  --disp-source up ^
+  --max-depth 12 ^
+  --stride 1 ^
+  --max-points-per-frame 0 ^
+  --static-voxel-size 0.02 ^
+  --static-min-obs 2 ^
+  --static-max-color-std 0.25

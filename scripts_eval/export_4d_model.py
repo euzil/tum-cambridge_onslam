@@ -24,22 +24,26 @@ def load_video(video_npz: Path) -> dict[str, np.ndarray]:
         if key not in data:
             raise KeyError(f"{video_npz} does not contain '{key}'")
 
-    if "droid_disps" in data:
-        disps = np.asarray(data["droid_disps"], dtype=np.float32)
-    elif "disps" in data:
-        disps = np.asarray(data["disps"], dtype=np.float32)
-    else:
-        raise KeyError(f"{video_npz} does not contain droid_disps/disps")
+    disps_low = np.asarray(data["droid_disps"], dtype=np.float32) if "droid_disps" in data else None
+    disps_up = np.asarray(data["droid_disps_up"], dtype=np.float32) if "droid_disps_up" in data else None
+    disps_generic = np.asarray(data["disps"], dtype=np.float32) if "disps" in data else None
+    if disps_low is None and disps_up is None and disps_generic is None:
+        raise KeyError(f"{video_npz} does not contain droid_disps_up/droid_disps/disps")
 
     poses = np.asarray(data["poses"], dtype=np.float32)
     timestamps = np.asarray(data["timestamps"] if "timestamps" in data else np.arange(len(poses)))
     return {
         "images": np.asarray(data["images"], dtype=np.float32),
         "poses": poses,
-        "disps": disps,
+        "disps_low": disps_low,
+        "disps_up": disps_up,
+        "disps_generic": disps_generic,
         "intrinsics": np.asarray(data["intrinsics"], dtype=np.float32),
         "uncertainties": np.asarray(data["uncertainties"], dtype=np.float32),
         "timestamps": timestamps,
+        "mono_disps": np.asarray(data["mono_disps"], dtype=np.float32)
+        if "mono_disps" in data
+        else None,
         "dynamic_motions": np.asarray(data["dynamic_motions"], dtype=np.float32)
         if "dynamic_motions" in data
         else None,
@@ -71,7 +75,10 @@ def frame_to_points(
     xs_f = xs.reshape(-1)
     ys_f = ys.reshape(-1)
     disp_f = disp[ys_f.astype(int), xs_f.astype(int)]
-    uncer_f = uncertainty[ys_f.astype(int), xs_f.astype(int)]
+    h_u, w_u = uncertainty.shape
+    yu = np.clip(np.round(ys_f * (h_u / h_l)).astype(int), 0, h_u - 1)
+    xu = np.clip(np.round(xs_f * (w_u / w_l)).astype(int), 0, w_u - 1)
+    uncer_f = uncertainty[yu, xu]
 
     valid = disp_f > 1e-6
     depth = np.zeros_like(disp_f, dtype=np.float32)
@@ -87,6 +94,14 @@ def frame_to_points(
     dynamic = uncer_f > uncer_thresh
 
     fx, fy, cx, cy = intr
+    # Intrinsics in video.npz are often in low-res tracking coordinates (e.g., 64x48).
+    # If disparity is exported at higher resolution (e.g., 512x384), rescale intrinsics.
+    sx_k = w_l / max(w_u, 1)
+    sy_k = h_l / max(h_u, 1)
+    fx = float(fx) * sx_k
+    fy = float(fy) * sy_k
+    cx = float(cx) * sx_k
+    cy = float(cy) * sy_k
     pts_cam = np.stack(
         [
             (xs_f - cx) / fx * depth,
@@ -107,7 +122,16 @@ def frame_to_points(
     colors = np.clip(image.transpose(1, 2, 0)[img_y, img_x] * 255.0, 0, 255).astype(np.uint8)
 
     pixel_ij = np.stack([ys_f, xs_f], axis=-1).astype(np.int32)
-    return pts_world.astype(np.float32), colors, dynamic.astype(bool), uncer_f.astype(np.float32), pixel_ij, depth
+    pixel_uncer_ij = np.stack([yu[valid], xu[valid]], axis=-1).astype(np.int32)
+    return (
+        pts_world.astype(np.float32),
+        colors,
+        dynamic.astype(bool),
+        uncer_f.astype(np.float32),
+        pixel_ij,
+        pixel_uncer_ij,
+        depth,
+    )
 
 
 def limit_points(
@@ -116,12 +140,13 @@ def limit_points(
     dynamic: np.ndarray,
     uncertainty: np.ndarray,
     pixel_ij: np.ndarray,
+    pixel_uncer_ij: np.ndarray,
     depth: np.ndarray,
     max_points: int,
     rng: np.random.Generator,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     if max_points <= 0 or len(points) <= max_points:
-        return points, colors, dynamic, uncertainty, pixel_ij, depth
+        return points, colors, dynamic, uncertainty, pixel_ij, pixel_uncer_ij, depth
 
     dyn_idx = np.where(dynamic)[0]
     sta_idx = np.where(~dynamic)[0]
@@ -133,7 +158,53 @@ def limit_points(
         sta_idx = rng.choice(sta_idx, size=n_sta, replace=False)
     idx = np.concatenate([dyn_idx, sta_idx])
     idx.sort()
-    return points[idx], colors[idx], dynamic[idx], uncertainty[idx], pixel_ij[idx], depth[idx]
+    return points[idx], colors[idx], dynamic[idx], uncertainty[idx], pixel_ij[idx], pixel_uncer_ij[idx], depth[idx]
+
+
+def select_disps(video: dict[str, np.ndarray], source: str) -> np.ndarray:
+    """Choose disparity source for reconstruction quality."""
+    low = video["disps_low"]
+    up = video["disps_up"]
+    generic = video["disps_generic"]
+    src = source.lower()
+    if src == "up":
+        if up is None:
+            raise KeyError("Requested --disp-source up but droid_disps_up is missing")
+        return up
+    if src == "low":
+        if low is None:
+            raise KeyError("Requested --disp-source low but droid_disps is missing")
+        return low
+    if src == "mono":
+        if "mono_disps" not in video or video["mono_disps"] is None:
+            raise KeyError("Requested --disp-source mono but mono_disps is missing")
+        return np.asarray(video["mono_disps"], dtype=np.float32)
+    # auto: prefer high-res droid output
+    if up is not None:
+        return up
+    if low is not None:
+        return low
+    if generic is not None:
+        return generic
+    raise KeyError("No valid disparity source found")
+
+
+def remove_statistical_outliers(points: np.ndarray, k: int, std_ratio: float) -> np.ndarray:
+    """Return boolean inlier mask via KNN distance statistics."""
+    n = len(points)
+    if n == 0:
+        return np.zeros((0,), dtype=bool)
+    if k <= 1 or n <= k + 2:
+        return np.ones((n,), dtype=bool)
+    try:
+        from scipy.spatial import cKDTree
+    except Exception:
+        return np.ones((n,), dtype=bool)
+    tree = cKDTree(points)
+    dists, _ = tree.query(points, k=k + 1)  # first is self (0)
+    mean_d = dists[:, 1:].mean(axis=1)
+    thr = mean_d.mean() + std_ratio * mean_d.std()
+    return mean_d <= thr
 
 
 def write_ply(
@@ -231,6 +302,9 @@ def save_matlab_model(
     motion_world: np.ndarray,
     predicted_next_points: np.ndarray,
     motion_valid: np.ndarray,
+    static_map_points: np.ndarray | None = None,
+    static_map_colors: np.ndarray | None = None,
+    static_map_obs: np.ndarray | None = None,
 ) -> None:
     """Save a MATLAB-friendly 4D model.
 
@@ -244,9 +318,7 @@ def save_matlab_model(
     """
     starts_1 = frame_offsets[:-1].astype(np.int64) + 1
     ends_1 = frame_offsets[1:].astype(np.int64)
-    savemat(
-        path,
-        {
+    mat_dict = {
             "points": points.astype(np.float32),
             "colors": colors.astype(np.uint8),
             "dynamic": dynamic.reshape(-1, 1),
@@ -263,9 +335,76 @@ def save_matlab_model(
             "motion_world": motion_world.astype(np.float32),
             "predicted_next_points": predicted_next_points.astype(np.float32),
             "motion_valid": motion_valid.reshape(-1, 1),
-        },
-        do_compression=True,
-    )
+    }
+    if static_map_points is not None and len(static_map_points) > 0:
+        mat_dict["static_map_points"] = static_map_points.astype(np.float32)
+        mat_dict["static_map_colors"] = static_map_colors.astype(np.uint8)
+        mat_dict["static_map_obs"] = static_map_obs.astype(np.int32).reshape(-1, 1)
+    savemat(path, mat_dict, do_compression=True)
+
+
+def build_static_map(
+    points: np.ndarray,
+    colors: np.ndarray,
+    dynamic: np.ndarray,
+    frame_ids: np.ndarray,
+    voxel_size: float,
+    min_obs: int,
+    max_color_std: float,
+    max_uncertainty: float,
+    uncertainty: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Fuse frame-wise points into a static map with temporal consistency."""
+    if len(points) == 0:
+        return (
+            np.zeros((0, 3), dtype=np.float32),
+            np.zeros((0, 3), dtype=np.uint8),
+            np.zeros((0,), dtype=np.int32),
+        )
+
+    keep = ~dynamic
+    if max_uncertainty > 0:
+        keep &= uncertainty <= max_uncertainty
+    pts = points[keep]
+    cols = colors[keep].astype(np.float32) / 255.0
+    fids = frame_ids[keep].astype(np.int64)
+    if len(pts) == 0:
+        return (
+            np.zeros((0, 3), dtype=np.float32),
+            np.zeros((0, 3), dtype=np.uint8),
+            np.zeros((0,), dtype=np.int32),
+        )
+
+    vox = np.floor(pts / max(voxel_size, 1e-6)).astype(np.int64)
+    _, inv = np.unique(vox, axis=0, return_inverse=True)
+    n_vox = int(inv.max()) + 1
+
+    cnt = np.bincount(inv, minlength=n_vox).astype(np.float32)
+    sum_pts = np.zeros((n_vox, 3), dtype=np.float64)
+    sum_cols = np.zeros((n_vox, 3), dtype=np.float64)
+    sum_cols2 = np.zeros((n_vox, 3), dtype=np.float64)
+    for d in range(3):
+        sum_pts[:, d] = np.bincount(inv, weights=pts[:, d], minlength=n_vox)
+        sum_cols[:, d] = np.bincount(inv, weights=cols[:, d], minlength=n_vox)
+        sum_cols2[:, d] = np.bincount(inv, weights=cols[:, d] ** 2, minlength=n_vox)
+
+    mean_pts = (sum_pts / cnt[:, None]).astype(np.float32)
+    mean_cols = sum_cols / cnt[:, None]
+    var_cols = np.maximum(sum_cols2 / cnt[:, None] - mean_cols**2, 0.0)
+    color_std = np.sqrt(var_cols).mean(axis=1)
+
+    pair = np.stack([inv, fids], axis=1)
+    uniq_pair = np.unique(pair, axis=0)
+    obs = np.bincount(uniq_pair[:, 0], minlength=n_vox).astype(np.int32)
+
+    stable = obs >= max(min_obs, 1)
+    if max_color_std > 0:
+        stable &= color_std <= max_color_std
+
+    map_pts = mean_pts[stable]
+    map_cols = np.clip(np.round(mean_cols[stable] * 255.0), 0, 255).astype(np.uint8)
+    map_obs = obs[stable]
+    return map_pts, map_cols, map_obs
 
 
 def export_4d_model(args: argparse.Namespace) -> None:
@@ -278,7 +417,7 @@ def export_4d_model(args: argparse.Namespace) -> None:
     video = load_video(video_npz)
     images = video["images"]
     poses = video["poses"]
-    disps = video["disps"]
+    disps = select_disps(video, args.disp_source)
     intrinsics = video["intrinsics"]
     uncertainties = video["uncertainties"]
     timestamps = video["timestamps"]
@@ -293,12 +432,13 @@ def export_4d_model(args: argparse.Namespace) -> None:
     all_predicted_next = []
     all_motion_valid = []
     all_time = []
+    all_frame_ids = []
     frame_offsets = [0]
     frame_counts = []
     frame_dynamic_counts = []
 
     for t in range(len(disps)):
-        pts, colors, dyn, uncer, pixel_ij, depth = frame_to_points(
+        pts, colors, dyn, uncer, pixel_ij, pixel_uncer_ij, depth = frame_to_points(
             images[t],
             poses[t],
             disps[t],
@@ -308,15 +448,46 @@ def export_4d_model(args: argparse.Namespace) -> None:
             args.stride,
             args.max_depth,
         )
-        pts, colors, dyn, uncer, pixel_ij, depth = limit_points(
-            pts, colors, dyn, uncer, pixel_ij, depth, args.max_points_per_frame, rng
+        pts, colors, dyn, uncer, pixel_ij, pixel_uncer_ij, depth = limit_points(
+            pts, colors, dyn, uncer, pixel_ij, pixel_uncer_ij, depth, args.max_points_per_frame, rng
         )
+
+        # Structure-preserving filtering to reduce "collapsed blob" artifacts.
+        if args.structure_mode:
+            keep = np.ones((len(pts),), dtype=bool)
+            if args.min_depth > 0:
+                keep &= depth >= args.min_depth
+            if args.max_uncertainty_quantile > 0:
+                q = float(np.quantile(uncer, min(max(args.max_uncertainty_quantile, 0.0), 1.0)))
+                keep &= uncer <= q
+            if args.border_crop > 0:
+                h_l, w_l = disps[t].shape
+                b = int(args.border_crop)
+                y = pixel_ij[:, 0]
+                x = pixel_ij[:, 1]
+                keep &= (x >= b) & (x < (w_l - b)) & (y >= b) & (y < (h_l - b))
+            pts = pts[keep]
+            colors = colors[keep]
+            dyn = dyn[keep]
+            uncer = uncer[keep]
+            pixel_ij = pixel_ij[keep]
+            pixel_uncer_ij = pixel_uncer_ij[keep]
+            depth = depth[keep]
+
+            inlier = remove_statistical_outliers(pts, k=args.sor_k, std_ratio=args.sor_std)
+            pts = pts[inlier]
+            colors = colors[inlier]
+            dyn = dyn[inlier]
+            uncer = uncer[inlier]
+            pixel_ij = pixel_ij[inlier]
+            pixel_uncer_ij = pixel_uncer_ij[inlier]
+            depth = depth[inlier]
 
         motion_world = np.zeros_like(pts, dtype=np.float32)
         motion_valid = np.zeros((len(pts),), dtype=bool)
         if dynamic_motions is not None and dynamic_motion_masks is not None and t + 1 < len(poses):
-            yy = pixel_ij[:, 0]
-            xx = pixel_ij[:, 1]
+            yy = pixel_uncer_ij[:, 0]
+            xx = pixel_uncer_ij[:, 1]
             mask_v = dynamic_motion_masks[t, yy, xx] > 0
             if np.any(mask_v):
                 motion_cam = dynamic_motions[t, yy[mask_v], xx[mask_v]]
@@ -343,6 +514,7 @@ def export_4d_model(args: argparse.Namespace) -> None:
         all_predicted_next.append(predicted_next)
         all_motion_valid.append(motion_valid)
         all_time.append(np.full((len(pts),), float(timestamps[t]), dtype=np.float32))
+        all_frame_ids.append(np.full((len(pts),), t, dtype=np.int32))
         frame_counts.append(len(pts))
         frame_dynamic_counts.append(int(dyn.sum()))
         frame_offsets.append(frame_offsets[-1] + len(pts))
@@ -371,10 +543,23 @@ def export_4d_model(args: argparse.Namespace) -> None:
         np.concatenate(all_motion_valid, axis=0) if all_motion_valid else np.zeros((0,), dtype=bool)
     )
     time = np.concatenate(all_time, axis=0) if all_time else np.zeros((0,), dtype=np.float32)
+    frame_ids = np.concatenate(all_frame_ids, axis=0) if all_frame_ids else np.zeros((0,), dtype=np.int32)
 
     frame_offsets_arr = np.asarray(frame_offsets, dtype=np.int64)
     frame_counts_arr = np.asarray(frame_counts, dtype=np.int64)
     frame_dynamic_counts_arr = np.asarray(frame_dynamic_counts, dtype=np.int64)
+
+    static_map_points, static_map_colors, static_map_obs = build_static_map(
+        points=points,
+        colors=colors,
+        dynamic=dynamic,
+        frame_ids=frame_ids,
+        voxel_size=args.static_voxel_size,
+        min_obs=args.static_min_obs,
+        max_color_std=args.static_max_color_std,
+        max_uncertainty=args.static_max_uncertainty,
+        uncertainty=uncertainty,
+    )
 
     np.savez_compressed(
         out_dir / "model_4d.npz",
@@ -390,8 +575,12 @@ def export_4d_model(args: argparse.Namespace) -> None:
         frame_offsets=frame_offsets_arr,
         frame_counts=frame_counts_arr,
         frame_dynamic_counts=frame_dynamic_counts_arr,
+        frame_ids=frame_ids,
         poses=poses,
         intrinsics=intrinsics,
+        static_map_points=static_map_points,
+        static_map_colors=static_map_colors,
+        static_map_obs=static_map_obs,
     )
 
     if args.write_mat:
@@ -411,6 +600,9 @@ def export_4d_model(args: argparse.Namespace) -> None:
             motion_world,
             predicted_next_points,
             motion_valid,
+            static_map_points=static_map_points,
+            static_map_colors=static_map_colors,
+            static_map_obs=static_map_obs,
         )
 
     track_stats = {"n_tracks": 0, "n_observations": 0}
@@ -428,12 +620,21 @@ def export_4d_model(args: argparse.Namespace) -> None:
         "n_points_total": int(len(points)),
         "n_dynamic_points_total": int(dynamic.sum()),
         "n_motion_valid_points_total": int(motion_valid.sum()),
+        "n_static_map_points": int(len(static_map_points)),
         "mean_points_per_frame": float(np.mean(frame_counts)) if frame_counts else 0.0,
         "mean_dynamic_per_frame": float(np.mean(frame_dynamic_counts)) if frame_dynamic_counts else 0.0,
         "uncer_thresh": args.uncer_thresh,
         "stride": args.stride,
         "max_depth": args.max_depth,
         "max_points_per_frame": args.max_points_per_frame,
+        "disp_source": args.disp_source,
+        "structure_mode": bool(args.structure_mode),
+        "static_map": {
+            "voxel_size": args.static_voxel_size,
+            "min_obs": args.static_min_obs,
+            "max_color_std": args.static_max_color_std,
+            "max_uncertainty": args.static_max_uncertainty,
+        },
         "dynamic_tracks": track_stats,
         "outputs": {
             "model_npz": "model_4d.npz",
@@ -469,9 +670,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--uncer-thresh", type=float, default=0.8, help="Dynamic uncertainty threshold")
     parser.add_argument("--stride", type=int, default=1, help="Low-res pixel stride for point sampling")
     parser.add_argument("--max-depth", type=float, default=8.0, help="Drop points deeper than this; <=0 disables")
+    parser.add_argument(
+        "--disp-source",
+        type=str,
+        default="auto",
+        choices=["auto", "up", "low", "mono"],
+        help="Disparity source: auto prefers droid_disps_up for better structure",
+    )
     parser.add_argument("--max-points-per-frame", type=int, default=0, help="Random cap per frame; <=0 disables")
     parser.add_argument("--match-radius", type=float, default=0.3, help="Dynamic track nearest-neighbor radius")
+    parser.add_argument("--static-voxel-size", type=float, default=0.03, help="Voxel size (m) for static-map fusion")
+    parser.add_argument("--static-min-obs", type=int, default=3, help="Min unique frame observations per static voxel")
+    parser.add_argument("--static-max-color-std", type=float, default=0.20, help="Max average RGB std per static voxel (0..1); <=0 disables")
+    parser.add_argument("--static-max-uncertainty", type=float, default=0.0, help="Keep static-map candidates with uncertainty <= X; <=0 disables")
     parser.add_argument("--seed", type=int, default=7, help="Random seed for point caps")
+    parser.add_argument("--structure-mode", action="store_true", help="Enable robust structure-preserving filtering")
+    parser.add_argument("--min-depth", type=float, default=0.15, help="Drop points closer than this (m) in structure mode")
+    parser.add_argument("--max-uncertainty-quantile", type=float, default=0.92, help="Keep points with uncertainty <= this quantile in each frame (0..1], structure mode")
+    parser.add_argument("--border-crop", type=int, default=2, help="Drop low-res border pixels in structure mode")
+    parser.add_argument("--sor-k", type=int, default=12, help="KNN neighbors for statistical outlier removal, structure mode")
+    parser.add_argument("--sor-std", type=float, default=1.0, help="Std ratio threshold for outlier removal, structure mode")
     parser.add_argument("--no-ply", dest="write_ply", action="store_false", help="Do not export per-frame PLY files")
     parser.add_argument("--no-tracks", dest="write_tracks", action="store_false", help="Do not export dynamic_tracks.npz")
     parser.add_argument("--no-mat", dest="write_mat", action="store_false", help="Do not export MATLAB .mat files")
