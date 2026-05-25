@@ -101,7 +101,11 @@ class SlidingWindowPredictor:
 
     def predict(self) -> Dict[int, List[np.ndarray]]:
         """
-        对所有当前 tracked 点返回未来 predict_steps 帧的预测位置。
+        对当前滑动窗口内仍活跃的点返回未来 predict_steps 帧的预测位置。
+
+        注意：这里不再对 self._predictors 中的所有历史点预测。
+        旧点如果已经离开滑动窗口，继续外推会把过期动态点写回
+        后续帧，导致反馈 mask 过大、污染 BA。
 
         Returns
         -------
@@ -111,10 +115,19 @@ class SlidingWindowPredictor:
         if not self.ready():
             return {}
 
-        return {
-            pid: kf.predict(self.predict_steps)
-            for pid, kf in self._predictors.items()
-        }
+        active_ids = self.get_active_point_ids(current_only=True)
+        return self.predict_for_ids(active_ids)
+
+    def predict_for_ids(self, point_ids) -> Dict[int, List[np.ndarray]]:
+        """只对指定 point ids 做未来预测。"""
+        preds: Dict[int, List[np.ndarray]] = {}
+        for pid in point_ids:
+            pid = int(pid)
+            kf = self._predictors.get(pid)
+            if kf is None or kf.n_observations < 2:
+                continue
+            preds[pid] = kf.predict(self.predict_steps)
+        return preds
 
     def get_history(self) -> Dict[int, List[np.ndarray]]:
         """
@@ -141,9 +154,38 @@ class SlidingWindowPredictor:
             return np.zeros((0, 3), dtype=float)
         return np.array(list(frame_dict.values()), dtype=float)
 
+    def get_current_point_ids(self) -> np.ndarray:
+        """返回最新一帧中出现的 point ids。"""
+        if len(self._window) == 0:
+            return np.zeros((0,), dtype=int)
+        _, frame_dict = self._window[-1]
+        return np.array(list(frame_dict.keys()), dtype=int)
+
+    def get_active_point_ids(self, current_only: bool = True) -> np.ndarray:
+        """
+        返回滑动窗口里的活跃 point ids。
+
+        current_only=True 时只返回最新一帧出现的点，适合在线反馈；
+        False 时返回整个窗口中出现过的点，适合画历史轨迹。
+        """
+        if current_only:
+            return self.get_current_point_ids()
+
+        ids = set()
+        for _, frame_dict in self._window:
+            ids.update(frame_dict.keys())
+        return np.array(sorted(ids), dtype=int)
+
     def ready(self) -> bool:
         """当已积累 window_size 帧时返回 True，可以开始预测。"""
         return len(self._window) >= self.window_size
+
+    def prune_inactive(self) -> None:
+        """删除已经不在滑动窗口中的 Kalman 状态，避免历史点无限累积。"""
+        active = set(self.get_active_point_ids(current_only=False).tolist())
+        stale = [pid for pid in self._predictors if pid not in active]
+        for pid in stale:
+            del self._predictors[pid]
 
     def reset(self) -> None:
         """重置所有状态（用于重新运行）。"""

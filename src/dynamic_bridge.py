@@ -596,13 +596,10 @@ class OnlineDynamicPredictor:
 
         # ---- 喂给 Kalman 滑动窗口 ----
         self._predictor.add_frame(pts_world, pids)
+        self._predictor.prune_inactive()
 
-        # 无论 WARM 期还是 PRED 期，对所有已有 Kalman 状态的点强制预测
-        # 直接访问 _predictors，绕过 ready() 检查
-        predictions = {
-            pid: kf.predict(self.predict_steps)
-            for pid, kf in self._predictor._predictors.items()
-        }
+        # 只预测当前滑动窗口最新帧仍可见的动态点，避免旧点长期外推。
+        predictions = self._predictor.predict_for_ids(pids)
         history = self._predictor.get_history()
 
         # 缓存给下一关键帧。下一帧刚 append 后、frontend BA 前写入，

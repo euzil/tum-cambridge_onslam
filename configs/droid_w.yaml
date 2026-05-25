@@ -167,12 +167,12 @@ dynamic_prediction:
   enable: True             # 设为 True 以启用动态预测流程
   online_enable: True      # True: 跟踪过程中在线预测并反馈到下一关键帧不确定性
   online_render: False     # True: 运行时保存在线预测叠加帧，较慢，仅调试时打开
-  online_make_gif: True   # True: 结束后合成 dynamic_prediction_online.gif，较慢
-  online_insert_raw_frames: True  # True: GIF 中插入原始非关键帧，文件更大且播放更慢
+  online_make_gif: False   # True: 结束后合成 dynamic_prediction_online.gif，较慢
+  online_insert_raw_frames: False  # True: GIF 中插入原始非关键帧，文件更大且播放更慢
 
   # 滑动窗口参数
-  window_size: 8            # 使用过去多少关键帧进行预测
-  predict_steps: 2          # 预测未来多少帧（通常 1-2）
+  window_size: 2            # 使用过去多少关键帧进行预测
+  predict_steps: 1          # 预测未来多少帧（通常 1-2）
 
   # Kalman Filter 参数
   process_noise: 0.1        # 过程噪声（越大越相信测量值）
