@@ -8,6 +8,7 @@ function view_static_env_dynamic_timeline_matlab(globalDir, pointSizeStatic, poi
 %
 % Optional:
 %   - model_4d.mat (for per-frame predicted_next_points overlay)
+%   - Next-frame dynamic points are shown in green for prediction comparison
 %
 % Usage:
 %   view_static_env_dynamic_timeline_matlab('Outputs/Bonn/bonn_balloon/slam_global')
@@ -81,6 +82,7 @@ hold(ax, 'on');
 hSta = scatter3(ax, nan, nan, nan, pointSizeStatic, [0.6, 0.6, 0.6], 'filled');
 hDyn = scatter3(ax, nan, nan, nan, pointSizeDynamic, [1.0, 0.1, 0.03], 'filled');
 hPred = scatter3(ax, nan, nan, nan, pointSizePred, [0.05, 0.95, 1.0], 'filled');
+hNextDyn = scatter3(ax, nan, nan, nan, pointSizeDynamic, [0.1, 1.0, 0.2], 'filled');
 axis(ax, 'equal');
 grid(ax, 'on');
 view(ax, 3);
@@ -121,6 +123,7 @@ slider.Callback = @(src, ~) update_frame(round(src.Value));
             set(hSta, 'XData', nan, 'YData', nan, 'ZData', nan);
         end
         idx = (round(dynFid) == f);
+        idxNext = (round(dynFid) == (f + 1));
         if any(idx)
             p = dynPts(idx, :);
             c = dynRgb(idx, :);
@@ -128,7 +131,18 @@ slider.Callback = @(src, ~) update_frame(round(src.Value));
         else
             set(hDyn, 'XData', nan, 'YData', nan, 'ZData', nan);
         end
+        if any(idxNext)
+            pNext = dynPts(idxNext, :);
+            set(hNextDyn, 'XData', pNext(:,1), 'YData', pNext(:,2), 'ZData', pNext(:,3), ...
+                'CData', repmat([0.1, 1.0, 0.2], size(pNext, 1), 1));
+        else
+            pNext = zeros(0, 3);
+            set(hNextDyn, 'XData', nan, 'YData', nan, 'ZData', nan);
+        end
+
         nPred = 0;
+        predErrMean = NaN;
+        predErrMedian = NaN;
         if hasPred && f <= numel(M.frame_start_1)
             lo = double(M.frame_start_1(f));
             hi = double(M.frame_end_1(f));
@@ -142,6 +156,11 @@ slider.Callback = @(src, ~) update_frame(round(src.Value));
                     set(hPred, 'XData', pred(:,1), 'YData', pred(:,2), 'ZData', pred(:,3), ...
                         'CData', repmat([0.05, 0.95, 1.0], size(pred, 1), 1));
                     nPred = size(pred, 1);
+                    if ~isempty(pNext)
+                        d = nearest_distances(pred, pNext);
+                        predErrMean = mean(d);
+                        predErrMedian = median(d);
+                    end
                 else
                     set(hPred, 'XData', nan, 'YData', nan, 'ZData', nan);
                 end
@@ -151,10 +170,38 @@ slider.Callback = @(src, ~) update_frame(round(src.Value));
         else
             set(hPred, 'XData', nan, 'YData', nan, 'ZData', nan);
         end
-        title(ax, sprintf('Frame %d / %d | static seen %d/%d | dynamic %d | predicted %d', ...
-            f, nFrames, nnz(idxSta), size(mapPts, 1), nnz(idx), nPred), 'Color', 'w');
+        if isfinite(predErrMean)
+            title(ax, sprintf(['Frame %d / %d | static seen %d/%d | dynamic(t) %d | ', ...
+                'pred(t->t+1) %d | dynamic(t+1) %d | pred->next mean %.3fm med %.3fm'], ...
+                f, nFrames, nnz(idxSta), size(mapPts, 1), nnz(idx), nPred, nnz(idxNext), ...
+                predErrMean, predErrMedian), 'Color', 'w');
+        else
+            title(ax, sprintf(['Frame %d / %d | static seen %d/%d | dynamic(t) %d | ', ...
+                'pred(t->t+1) %d | dynamic(t+1) %d'], ...
+                f, nFrames, nnz(idxSta), size(mapPts, 1), nnz(idx), nPred, nnz(idxNext)), 'Color', 'w');
+        end
         txt.String = sprintf('Frame %d', f);
         slider.Value = f;
         drawnow;
     end
+end
+
+function d = nearest_distances(srcPts, dstPts)
+if isempty(srcPts) || isempty(dstPts)
+    d = [];
+    return;
+end
+
+n = size(srcPts, 1);
+d = inf(n, 1);
+chunk = 512;
+for i = 1:chunk:n
+    j = min(i + chunk - 1, n);
+    a = srcPts(i:j, :);
+    dx = a(:, 1) - dstPts(:, 1).';
+    dy = a(:, 2) - dstPts(:, 2).';
+    dz = a(:, 3) - dstPts(:, 3).';
+    dist2 = dx.^2 + dy.^2 + dz.^2;
+    d(i:j) = sqrt(min(dist2, [], 2));
+end
 end
