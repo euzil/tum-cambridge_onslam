@@ -18,8 +18,101 @@
 - `export_static_reconstruction.py`
 - `validate_4d_model_file.py`
 - `optimize_static_map_matlab.m`
+- `evaluate_dynamic_method.py`
 
 说明：历史重复/诊断脚本已归档到 `scripts_eval/_archived_legacy_2026-05-25`。
+
+## 点级 Kalman 在线预测版本总结
+
+本阶段实现的是 point-level dynamic prediction：
+1. 在 `tracker.py` 中启用在线 `OnlineDynamicPredictor`。
+2. 从每个关键帧的不确定性图和深度图中选取动态候选点。
+3. 对动态候选点做跨帧 ID 匹配。
+4. 使用滑动窗口 Kalman 预测下一关键帧动态点位置。
+5. 将预测结果反馈到两条在线路径：
+   - 写入 `uncertainties`，改变 BA 权重；
+   - 写入 `dynamic_motions / dynamic_motion_priors / dynamic_motion_masks`，供 CUDA BA 的动态 motion variable 使用。
+6. SLAM 结束后，`export_4d_model.py` 将动态点、预测点和 motion field 导出到 `model_4d.npz/.mat`。
+
+### 已完成的关键修复
+- 在线预测不再只作为离线可视化，而是在下一关键帧 frontend BA 前写入反馈。
+- 同一对 `(source_kf, target_kf)` 只应用一次反馈，避免重复提高 uncertainty。
+- 动态候选点加入 `min_dynamic_points / max_dynamic_points`，避免每帧只有十几个点。
+- 跨帧 ID 匹配从“多对一最近邻”改为“一对一贪心匹配”，避免多个点共享同一 ID 后被滑动窗口字典覆盖。
+- feedback mask 超过覆盖率上限时，不再整帧跳过，而是自动缩小 splat 半径或采样到允许范围。
+- 增加在线诊断日志：
+  - `dynamic_id_match_stats.csv`
+  - `dynamic_feedback_stats.csv`
+  - `dynamic_motion_feedback_stats.csv`
+  - `dynamic_ba_edge_stats.csv`
+
+### 当前数值结果
+基于 `Outputs/Bonn/bonn_balloon/4d_model_checked/model_4d.npz` 和 `Outputs/Bonn/bonn_balloon` 日志：
+
+```text
+online predictions mean: 373.442
+feedback applied ratio: 1.000
+BA adjacent mask ratio: 0.724
+motion valid dynamic points: 1870348
+4D NN error motion/static: 0.089454 / 0.087068 m
+4D temporal consistency gain: -2.74%
+axis signed mean [m]: x=+0.000728, y=+0.000430, z=-0.005181
+```
+
+这说明当前实现已经完成了“预测进入在线 SLAM 与 4D 导出”的链路：
+- 平均每帧有数百个预测点；
+- uncertainty feedback 已稳定应用；
+- dynamic motion prior 已稳定写入；
+- BA 中相邻动态边有明显覆盖；
+- 导出的 4D 模型没有明显坐标轴系统偏差。
+
+但是，点级 Kalman motion 在当前点级最近邻评估中没有超过 static carry-forward baseline：
+- `motion_nn_m_mean = 0.089454 m`
+- `static_nn_m_mean = 0.087068 m`
+- 相对增益为 `-2.74%`
+
+因此，本阶段结论是：point-level Kalman 预测链路有效接入，但点级预测本身不是当前 4D 动态物体建模的最优核心方法。
+
+### 为什么点级 Kalman 效果有限
+- RGB-D 点云中的“同一个像素点/表面点”跨帧并不稳定，视角变化会导致重采样。
+- 深度噪声会让单点 3D 坐标抖动，Kalman 容易学习到噪声运动。
+- 最近邻 ID 匹配是几何近邻，不是真实物理点对应。
+- 动态物体通常近似刚体或局部刚体运动，点级独立预测会破坏物体整体一致性。
+- 点级 NN 评估对表面采样密度、遮挡、深度厚度很敏感。
+
+下一步建议转向 object-level 或 region-level motion：
+1. 用动态 mask 聚成物体区域。
+2. 对每个动态物体估计整体刚体/近刚体 motion。
+3. 用物体级 motion 生成 4D 动态轨迹。
+4. 使用 Chamfer distance、centroid error、temporal IoU、object trajectory consistency 等指标评估。
+
+## 数值评估方法
+
+新增统一评估脚本：
+
+```bash
+python scripts_eval/evaluate_dynamic_method.py \
+  --model-npz Outputs/Bonn/bonn_balloon/4d_model_checked/model_4d.npz \
+  --output-dir Outputs/Bonn/bonn_balloon \
+  --max-nn-dist 0.5 \
+  --out-prefix Outputs/Bonn/bonn_balloon/4d_model_checked/dynamic_method_eval
+```
+
+输出文件：
+- `dynamic_method_eval.csv`：指标总表，适合放实验表格。
+- `dynamic_method_eval.json`：完整指标，适合记录实验配置。
+- `dynamic_method_eval_per_frame.csv`：逐帧 dynamic 4D consistency。
+
+核心指标解释：
+- `feedback_predictions_mean`：每帧平均在线预测点数量。
+- `feedback_applied_ratio`：uncertainty feedback 实际应用比例。
+- `motion_applied_ratio`：dynamic motion prior 实际写入比例。
+- `ba_adjacent_mask_ratio`：BA 相邻边中可使用 dynamic mask 的比例。
+- `model_motion_valid_points`：导出 4D 模型中有有效 motion 的动态点数量。
+- `static_nn_m_mean`：不使用 motion，直接将当前动态点与下一帧动态点做最近邻的误差。
+- `motion_nn_m_mean`：使用预测 motion 后，与下一帧动态点做最近邻的误差。
+- `motion_vs_static_gain_percent`：`static_nn_m_mean` 相对 `motion_nn_m_mean` 的提升率。
+- `axis_*_signed_mean_m`：三轴有符号误差，用于判断是否存在坐标轴系统偏差。
 
 ## 推荐流程
 
