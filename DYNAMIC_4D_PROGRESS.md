@@ -114,6 +114,306 @@ python scripts_eval/evaluate_dynamic_method.py \
 - `motion_vs_static_gain_percent`：`static_nn_m_mean` 相对 `motion_nn_m_mean` 的提升率。
 - `axis_*_signed_mean_m`：三轴有符号误差，用于判断是否存在坐标轴系统偏差。
 
+## 学习式像素点运动预测流程
+
+为了替代点级 Kalman，本阶段新增一个轻量 learned pixel-flow baseline。目标是先在离线数据上证明模型能预测动态像素的下一帧位置，再考虑接回在线 SLAM。
+
+新增文件：
+- `dynamic_prediction/pixel_motion_model.py`
+- `scripts_train/build_pixel_motion_dataset.py`
+- `scripts_train/train_pixel_motion.py`
+- `scripts_train/evaluate_pixel_motion.py`
+
+### 1) 构建训练数据
+
+单序列快速测试：
+
+```bash
+python scripts_train/build_pixel_motion_dataset.py \
+  --video-npz Outputs/Bonn/bonn_balloon/video.npz \
+  --out datasets_train/bonn_balloon_pixel_motion \
+  --uncer-thresh 0.8 \
+  --min-dynamic-points 300 \
+  --max-dynamic-points 800 \
+  --max-depth 8 \
+  --max-nn-dist 0.5 \
+  --min-labels 10 \
+  --skip-missing
+```
+
+输出：
+- `samples.npz`
+- `metadata.json`
+
+每个训练样本包含：
+- `inputs`: `[6,H,W]`，RGB、disparity、uncertainty、dynamic mask。
+- `flows`: `[2,H,W]`，低分辨率像素位移 `(du,dv)`。
+- `valids`: `[1,H,W]`，有效监督 mask。
+
+当前 Bonn balloon 冒烟测试结果：
+
+```text
+samples=55
+labels_mean=552.60
+```
+
+如果要使用 Bonn 数据集，应先为每个 Bonn 动态序列生成 `video.npz`：
+
+```bash
+for cfg in \
+  configs/Dynamic/Bonn/bonn_balloon.yaml \
+  configs/Dynamic/Bonn/bonn_balloon2.yaml \
+  configs/Dynamic/Bonn/bonn_crowd.yaml \
+  configs/Dynamic/Bonn/bonn_crowd2.yaml \
+  configs/Dynamic/Bonn/bonn_moving_nonobstructing_box.yaml \
+  configs/Dynamic/Bonn/bonn_moving_nonobstructing_box2.yaml \
+  configs/Dynamic/Bonn/bonn_person_tracking.yaml \
+  configs/Dynamic/Bonn/bonn_person_tracking2.yaml
+do
+  python run.py --config "$cfg"
+done
+```
+
+更有用的 Bonn-only 多序列训练集：
+
+```bash
+python scripts_train/build_pixel_motion_dataset.py \
+  --video-npz \
+    Outputs/Bonn/bonn_balloon/video.npz \
+    Outputs/Bonn/bonn_balloon2/video.npz \
+    Outputs/Bonn/bonn_crowd/video.npz \
+    Outputs/Bonn/bonn_crowd2/video.npz \
+    Outputs/Bonn/bonn_moving_nonobstructing_box/video.npz \
+    Outputs/Bonn/bonn_moving_nonobstructing_box2/video.npz \
+    Outputs/Bonn/bonn_person_tracking/video.npz \
+    Outputs/Bonn/bonn_person_tracking2/video.npz \
+  --out datasets_train/bonn_dynamic_pixel_motion \
+  --uncer-thresh 0.8 \
+  --min-dynamic-points 300 \
+  --max-dynamic-points 800 \
+  --max-depth 8 \
+  --max-nn-dist 0.5 \
+  --min-labels 10
+```
+
+当前本地已生成的 Bonn 子集构建结果：
+
+```text
+sources=2
+available videos:
+- Outputs/Bonn/bonn_balloon/video.npz
+- Outputs/Bonn/bonn_person_tracking2/video.npz
+```
+
+推荐优先使用完整 Bonn 训练集 `datasets_train/bonn_dynamic_pixel_motion/samples.npz`，而不是只用单一 `bonn_balloon`。
+
+### 2) 训练 Small U-Net
+
+正式训练建议：
+
+```bash
+python scripts_train/train_pixel_motion.py \
+  --dataset datasets_train/bonn_dynamic_pixel_motion/samples.npz \
+  --out checkpoints/pixel_motion_bonn_dynamic \
+  --epochs 100 \
+  --batch-size 8 \
+  --base-channels 32 \
+  --lr 1e-3
+```
+
+快速冒烟测试：
+
+```bash
+python scripts_train/train_pixel_motion.py \
+  --dataset datasets_train/bonn_balloon_pixel_motion/samples.npz \
+  --out checkpoints/pixel_motion_bonn_balloon_sanity \
+  --epochs 3 \
+  --batch-size 8 \
+  --base-channels 16 \
+  --lr 1e-3
+```
+
+冒烟测试输出：
+
+```text
+best val EPE: 4.960599 px
+```
+
+### 3) 评估 learned flow
+
+```bash
+python scripts_train/evaluate_pixel_motion.py \
+  --dataset datasets_train/bonn_dynamic_pixel_motion/samples.npz \
+  --checkpoint checkpoints/pixel_motion_bonn_dynamic/best.pt \
+  --batch-size 16 \
+  --out checkpoints/pixel_motion_bonn_dynamic/eval.json
+```
+
+评估指标：
+- `learned_epe_px_mean`：模型预测 flow 的平均 endpoint error。
+- `zero_epe_px_mean`：不预测运动、flow 为 0 的 baseline。
+- `learned_vs_zero_gain_percent`：相对 zero-flow baseline 的提升率。
+
+3 epoch 冒烟测试仅用于验证代码链路：
+
+```text
+learned EPE: 4.948573 px
+zero-flow EPE: 4.950517 px
+relative gain: +0.04%
+```
+
+这个结果不能代表最终模型效果；正式判断需要使用 100 epoch 左右训练，并最好加入更多动态序列。
+
+### 4) 将 learned flow 写回 4D motion
+
+像素 flow 训练有效后，可以把 checkpoint 应用到 `video.npz`，生成 learned dynamic motion 版本：
+
+```bash
+python scripts_train/apply_pixel_motion_to_video.py \
+  --video-npz Outputs/Bonn/bonn_balloon/video.npz \
+  --checkpoint checkpoints/pixel_motion_bonn_dynamic/best.pt \
+  --out-video Outputs/Bonn/bonn_balloon/video_learned_motion_nextdepth_filt.npz \
+  --uncer-thresh 0.8 \
+  --min-dynamic-points 300 \
+  --max-dynamic-points 800 \
+  --max-depth 8 \
+  --max-flow-px 8 \
+  --max-motion-m 0.5 \
+  --depth-mode next \
+  --batch-size 16 \
+  --device cpu
+```
+
+`--depth-mode next` 会使用预测像素在下一帧的深度和两帧 pose 计算 3D motion；`--max-motion-m` 用来过滤遮挡和错误深度导致的异常大 motion。
+
+导出 learned 4D 模型：
+
+```bash
+python scripts_eval/export_4d_model.py \
+  --video-npz Outputs/Bonn/bonn_balloon/video_learned_motion_nextdepth_filt.npz \
+  --output-dir Outputs/Bonn/bonn_balloon/4d_model_learned_motion_nextdepth_filt \
+  --uncer-thresh 0.8 \
+  --stride 1 \
+  --max-depth 8 \
+  --disp-source up \
+  --no-ply
+```
+
+评估：
+
+```bash
+python scripts_eval/evaluate_dynamic_method.py \
+  --model-npz Outputs/Bonn/bonn_balloon/4d_model_learned_motion_nextdepth_filt/model_4d.npz \
+  --output-dir Outputs/Bonn/bonn_balloon \
+  --max-nn-dist 0.5 \
+  --out-prefix Outputs/Bonn/bonn_balloon/4d_model_learned_motion_nextdepth_filt/dynamic_method_eval
+
+python scripts_eval/diagnose_4d_axis_error.py \
+  --model-npz Outputs/Bonn/bonn_balloon/4d_model_learned_motion_nextdepth_filt/model_4d.npz \
+  --max-nn-dist 0.5
+```
+
+当前 learned 版本结果：
+
+```text
+pixel-flow learned EPE: 4.290569 px
+pixel-flow zero EPE: 5.737912 px
+pixel-flow gain: +25.22%
+
+video learned motion:
+active pixels: 13674
+active ratio: 7.9485%
+flow mean: 3.0080 px
+motion mean: 0.231909 m
+motion p90: 0.427529 m
+
+4D learned next-depth filtered:
+matched predicted points: 829526
+NN distance mean: 0.077701 m
+NN distance median: 0.049229 m
+NN distance p90: 0.184649 m
+axis signed mean: x=-0.002443, y=-0.000411, z=-0.003878 m
+
+dynamic method eval:
+motion_nn_m_mean: 0.079990
+static_nn_m_mean: 0.078459
+motion_vs_static_gain_percent: -1.95%
+```
+
+结论：learned pixel-flow 在像素预测上明显优于 zero-flow，并且 learned 4D 的绝对 NN 误差已经降到 `0.0777 m`；但在当前逐点 static carry-forward 对照指标上仍未转正。因此 learned 方法已经比点级 Kalman 更有潜力，但若要得到稳定正收益，下一步应继续做 object-level/region-level 运动约束或更强的监督标签。
+
+### 5) Region/Object-level motion smoothing
+
+为了让同一个动态区域共享更稳定的 motion，新增区域级平滑脚本：
+
+```bash
+python scripts_train/smooth_video_motion_regions.py \
+  --video-npz Outputs/Bonn/bonn_balloon/video_learned_motion_nextdepth_filt.npz \
+  --out-video Outputs/Bonn/bonn_balloon/video_learned_motion_region.npz \
+  --min-component-pixels 12 \
+  --dilate-iters 1 \
+  --mode median \
+  --trim-quantile 0.9 \
+  --blend 0.75
+```
+
+该脚本会：
+- 对每帧 `dynamic_motion_masks` 做连通区域；
+- 丢弃过小区域；
+- 对每个区域内的 learned 3D motion 做 trimmed median；
+- 将点级 motion 与区域级 motion 混合，得到更稳定的 region-level motion。
+
+导出 region-level 4D 模型：
+
+```bash
+python scripts_eval/export_4d_model.py \
+  --video-npz Outputs/Bonn/bonn_balloon/video_learned_motion_region.npz \
+  --output-dir Outputs/Bonn/bonn_balloon/4d_model_learned_motion_region \
+  --uncer-thresh 0.8 \
+  --stride 1 \
+  --max-depth 8 \
+  --disp-source up \
+  --no-ply
+```
+
+评估：
+
+```bash
+python scripts_eval/evaluate_dynamic_method.py \
+  --model-npz Outputs/Bonn/bonn_balloon/4d_model_learned_motion_region/model_4d.npz \
+  --output-dir Outputs/Bonn/bonn_balloon \
+  --max-nn-dist 0.5 \
+  --out-prefix Outputs/Bonn/bonn_balloon/4d_model_learned_motion_region/dynamic_method_eval
+
+python scripts_eval/diagnose_4d_axis_error.py \
+  --model-npz Outputs/Bonn/bonn_balloon/4d_model_learned_motion_region/model_4d.npz \
+  --max-nn-dist 0.5
+```
+
+当前最佳 region-level learned 结果：
+
+```text
+video learned region:
+active pixels: 13035
+active ratio: 7.5771%
+components mean: 2.02
+motion mean: 0.100019 m
+
+4D learned region:
+matched predicted points: 792619
+NN distance mean: 0.065516 m
+NN distance median: 0.038219 m
+NN distance p90: 0.159599 m
+axis signed mean: x=-0.002681, y=-0.000651, z=-0.002358 m
+
+dynamic method eval:
+motion_nn_m_mean: 0.066065
+static_nn_m_mean: 0.076519
+motion_vs_static_gain_percent: +13.66%
+```
+
+这是当前最好的 4D 动态建模结果。它说明：单点 Kalman 不够稳定，learned pixel-flow 有效，而 region/object-level motion smoothing 能把 learned motion 转化为真正有正收益的 4D 动态地图。
+
 ## 推荐流程
 
 ### 1) 导出 4D 模型（Python）

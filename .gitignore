@@ -2,3 +2,8 @@ datasets/
 d4rt_data/
 Outputs/
 output/
+checkpoints/
+Bonn/
+bonn_balloon/
+bonn_balloon_baseline/
+datasets_train/
