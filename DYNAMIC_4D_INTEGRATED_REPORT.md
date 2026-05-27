@@ -379,6 +379,89 @@ ConvBlock -> Downsample -> ConvBlock -> Downsample
 dynamic_prediction/pixel_motion_model.py
 ```
 
+核心类：
+
+```python
+class SmallPixelMotionUNet(nn.Module):
+```
+
+模型输入输出：
+
+```text
+input : [B, 6, H, W]
+        RGB 3 channels
+        disparity 1 channel
+        uncertainty 1 channel
+        dynamic mask 1 channel
+
+output: [B, 2, H, W]
+        du, dv pixel motion
+```
+
+网络由以下模块组成：
+
+```text
+enc1 -> down1 -> enc2 -> down2 -> bottleneck
+     -> up2 + skip enc2 -> dec2
+     -> up1 + skip enc1 -> dec1
+     -> 1x1 conv head -> 2D flow
+```
+
+其中：
+
+| 模块 | 作用 |
+|---|---|
+| `ConvBlock` | 两层 `Conv2d + BatchNorm + ReLU`，提取局部特征 |
+| `down1 / down2` | `MaxPool2d` 下采样，扩大感受野 |
+| `bottleneck` | 聚合更大范围的运动上下文 |
+| `up2 / up1` | `ConvTranspose2d` 上采样，恢复空间分辨率 |
+| skip connection | 保留像素级定位信息 |
+| `head` | `1x1 Conv2d`，输出 `(du, dv)` |
+
+模型在训练脚本中实例化：
+
+```text
+scripts_train/train_pixel_motion.py
+```
+
+对应代码逻辑：
+
+```python
+model = SmallPixelMotionUNet(
+    in_channels=inputs.shape[1],
+    base_channels=args.base_channels,
+    out_channels=flows.shape[1],
+).to(device)
+```
+
+模型在推理/写回 `video.npz` 时再次实例化：
+
+```text
+scripts_train/apply_pixel_motion_to_video.py
+```
+
+对应代码逻辑：
+
+```python
+model = SmallPixelMotionUNet(
+    in_channels=int(ckpt.get("in_channels", 6)),
+    base_channels=int(ckpt.get("base_channels", 32)),
+    out_channels=int(ckpt.get("out_channels", 2)),
+).to(device)
+```
+
+checkpoint 中会保存：
+
+| 字段 | 含义 |
+|---|---|
+| `model` | 网络权重 |
+| `in_channels` | 输入通道数，当前为 6 |
+| `base_channels` | U-Net 基础通道数，默认 32 |
+| `out_channels` | 输出通道数，当前为 2 |
+| `epoch` | 最优 checkpoint 对应 epoch |
+| `val_epe` | 验证集 EPE |
+| `dataset` | 训练数据路径 |
+
 损失函数：
 
 ```text
