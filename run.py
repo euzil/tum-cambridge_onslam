@@ -21,11 +21,15 @@ def setup_seed(seed):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, help='Path to config file.')
+    parser.add_argument('--video-name', type=str, default=None,
+                        help='Output npz filename, default: video.npz')
     args = parser.parse_args()
 
     torch.multiprocessing.set_start_method('spawn')
 
     cfg = config.load_config(args.config)
+    if args.video_name is not None:
+        cfg.setdefault('data', {})['video_name'] = args.video_name
     setup_seed(cfg['setup_seed'])
     if cfg['fast_mode']:
         # Force the final refine iterations to be 3000 if in fast mode
@@ -58,4 +62,3 @@ if __name__ == '__main__':
 
     end_time = strftime("%Y-%m-%d %H:%M:%S", gmtime())
     print("-"*30+Fore.LIGHTRED_EX+f"\nWildGS-SLAM finishes!\n"+Style.RESET_ALL+f"{end_time}\n"+"-"*30)
-

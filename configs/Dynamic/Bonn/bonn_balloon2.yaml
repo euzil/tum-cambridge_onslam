@@ -5,7 +5,9 @@ data:
   input_folder: ROOT_FOLDER_PLACEHOLDER/rgbd_bonn_balloon2
 
 tracking:
-  buffer: 150        # 原来350，减少关键帧缓存
+  buffer: 200
+  motion_filter:
+    thresh: 2.5
   frontend:
-    window: 15       # 原来25，减少局部BA窗口
-    max_factors: 50  # 原来75，减少最大边数
+    window: 15
+    max_factors: 50

@@ -29,6 +29,10 @@ class SLAM:
         self.verbose: bool = cfg["verbose"]
         self.logger = None
         self.save_dir = cfg["data"]["output"] + "/" + cfg["scene"]
+        video_name = cfg.get("data", {}).get("video_name", "video.npz")
+        if not video_name.endswith(".npz"):
+            video_name = f"{video_name}.npz"
+        self.video_path = os.path.join(self.save_dir, video_name)
 
         os.makedirs(self.save_dir, exist_ok=True)
 
@@ -147,11 +151,11 @@ class SLAM:
             self.cfg["tracking"]["backend"]["final_ba"]
             and self.cfg["mapping"]["eval_before_final_ba"]
         ):
-            self.video.save_video(f"{self.save_dir}/video.npz")
+            self.video.save_video(self.video_path)
             if not isinstance(self.stream, RGB_NoPose):
                 try:
                     ate_statistics, global_scale, r_a, t_a = kf_traj_eval(
-                        f"{self.save_dir}/video.npz",
+                        self.video_path,
                         f"{self.save_dir}/traj/before_final_ba",
                         "kf_traj",
                         self.stream,
@@ -174,11 +178,11 @@ class SLAM:
         if self.cfg["tracking"]["backend"]["final_ba"]:
             self.backend()
 
-        self.video.save_video(f"{self.save_dir}/video.npz")
+        self.video.save_video(self.video_path)
         if not isinstance(self.stream, RGB_NoPose):
             try:
                 ate_statistics, global_scale, r_a, t_a = kf_traj_eval(
-                    f"{self.save_dir}/video.npz",
+                    self.video_path,
                     f"{self.save_dir}/traj",
                     "kf_traj",
                     self.stream,
@@ -248,7 +252,7 @@ class SLAM:
             return
 
         dp_cfg = self.cfg.get("dynamic_prediction", {})
-        video_npz = f"{self.save_dir}/video.npz"
+        video_npz = self.video_path
 
         self.printer.print("Running dynamic point prediction ...", FontColor.INFO)
         bridge = DynamicBridge(
@@ -270,7 +274,7 @@ class SLAM:
             "Evaluate sensor depth error with per frame alignment", FontColor.EVAL
         )
         depth_l1, depth_l1_max_4m, coverage = self.video.eval_depth_l1(
-            f"{self.save_dir}/video.npz", self.stream
+            self.video_path, self.stream
         )
         self.printer.print("Depth L1: " + str(depth_l1), FontColor.EVAL)
         self.printer.print("Depth L1 mask 4m: " + str(depth_l1_max_4m), FontColor.EVAL)
@@ -280,7 +284,7 @@ class SLAM:
             "Evaluate sensor depth error with global alignment", FontColor.EVAL
         )
         depth_l1_g, depth_l1_max_4m_g, _ = self.video.eval_depth_l1(
-            f"{self.save_dir}/video.npz", self.stream, global_scale
+            self.video_path, self.stream, global_scale
         )
         self.printer.print("Depth L1: " + str(depth_l1_g), FontColor.EVAL)
         self.printer.print(

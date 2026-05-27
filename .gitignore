@@ -8,3 +8,4 @@ bonn_balloon/
 bonn_balloon_baseline/
 datasets_train/
 bonn_crowd/
+.method_configs/
