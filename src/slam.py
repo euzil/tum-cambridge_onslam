@@ -1,5 +1,5 @@
 import os
-from AB_1.src.gui import gui_utils
+from src.gui import gui_utils
 import torch
 import numpy as np
 import time
@@ -7,21 +7,21 @@ from collections import OrderedDict
 import torch.multiprocessing as mp
 from munch import munchify
 
-from AB_1.src.modules.droid_net import DroidNet
-from AB_1.src.depth_video import DepthVideo
-from AB_1.src.trajectory_filler import PoseTrajectoryFiller
-from AB_1.src.utils.common import setup_seed, update_cam
-from AB_1.src.utils.Printer import Printer, FontColor
-from AB_1.src.utils.eval_traj import kf_traj_eval, full_traj_eval, full_traj_fill
-from AB_1.src.utils.datasets import BaseDataset
-from AB_1.src.tracker import Tracker
-from AB_1.src.mapper import Mapper
-from AB_1.src.backend import Backend
-from AB_1.src.utils.datasets import RGB_NoPose
-from AB_1.src.gui import slam_gui
+from src.modules.droid_net import DroidNet
+from src.depth_video import DepthVideo
+from src.trajectory_filler import PoseTrajectoryFiller
+from src.utils.common import setup_seed, update_cam
+from src.utils.Printer import Printer, FontColor
+from src.utils.eval_traj import kf_traj_eval, full_traj_eval, full_traj_fill
+from src.utils.datasets import BaseDataset
+from src.tracker import Tracker
+from src.mapper import Mapper
+from src.backend import Backend
+from src.utils.datasets import RGB_NoPose
+from src.gui import slam_gui
 from thirdparty.gaussian_splatting.scene.gaussian_model import GaussianModel
 from torch.utils.tensorboard import SummaryWriter
-from AB_1.src.utils.sys_timer import timer
+from src.utils.sys_timer import timer
 import ctypes
 
 class SLAM:
@@ -320,7 +320,7 @@ class SLAM:
 
         # visualizer
         if self.cfg['droidvis']:
-            from AB_1.src.utils.droid_visualization_rerun import droid_visualization_rerun
+            from src.utils.droid_visualization_rerun import droid_visualization_rerun
             self.visualizer = mp.Process(
                 target=droid_visualization_rerun,
                 args=(self.video,),

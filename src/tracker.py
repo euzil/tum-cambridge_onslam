@@ -1,14 +1,14 @@
-from AB_1.src.motion_filter import MotionFilter
-from AB_1.src.frontend import Frontend 
-from AB_1.src.backend import Backend
+from src.motion_filter import MotionFilter
+from src.frontend import Frontend 
+from src.backend import Backend
 import torch
 from colorama import Fore, Style
 from multiprocessing.connection import Connection
-from AB_1.src.utils.datasets import BaseDataset
-from AB_1.src.utils.Printer import Printer,FontColor
-from AB_1.src.utils.datasets import RGB_NoPose
-from AB_1.src.utils.eval_traj import kf_traj_eval, full_traj_eval
-from AB_1.src.utils.sys_timer import timer
+from src.utils.datasets import BaseDataset
+from src.utils.Printer import Printer,FontColor
+from src.utils.datasets import RGB_NoPose
+from src.utils.eval_traj import kf_traj_eval, full_traj_eval
+from src.utils.sys_timer import timer
 import os
 from torch.utils.tensorboard import SummaryWriter
 

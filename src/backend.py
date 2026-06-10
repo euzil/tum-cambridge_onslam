@@ -14,6 +14,8 @@
 
 import torch
 from src.factor_graph import FactorGraph
+from src.factor_graph_d4rt import D4RTFactorGraph
+from src.modules.d4rt_frontend import D4RTFrontend
 from copy import deepcopy
 
 class Backend:
@@ -37,6 +39,32 @@ class Backend:
         self.backend_loop_thresh = cfg['tracking']['backend']['loop_thresh']
         self.backend_loop_radius = cfg['tracking']['backend']['loop_radius']
         self.backend_loop_nms = cfg['tracking']['backend']['loop_nms']
+        self.use_d4rt = cfg['tracking'].get('d4rt', {}).get('activate', False)
+        self.d4rt_frontend = None
+        if self.use_d4rt:
+            self.d4rt_frontend = D4RTFrontend(
+                cfg,
+                device=self.device,
+                ht=video.ht,
+                wd=video.wd,
+                down_scale=video.down_scale,
+            )
+
+    def _make_graph(self, max_factors):
+        if self.use_d4rt:
+            return D4RTFactorGraph(
+                self.video,
+                self.d4rt_frontend,
+                device=self.device,
+                max_factors=max_factors,
+            )
+        return FactorGraph(
+            self.video,
+            self.update_op,
+            device=self.device,
+            corr_impl='alt',
+            max_factors=max_factors,
+        )
 
     @torch.no_grad()
     def backend_ba(self, t_start, t_end, steps, graph, nms, radius, thresh, max_factors, t_start_loop=None, loop=False, motion_only=False, enable_wq=True, enable_update_uncer=False, enable_udba=False, visualization_stage=False, save_edges_weights=False):
@@ -77,8 +105,7 @@ class Backend:
         max_factors = ((radius + 2) * 2) * n
         if self.backend_normalize:
             self.video.normalize()
-        graph = FactorGraph(self.video, self.update_op, device=self.device, 
-                            corr_impl='alt', max_factors=max_factors)
+        graph = self._make_graph(max_factors)
         n_edges = self.backend_ba(t_start, t_end, steps, graph, nms, radius, 
                           thresh, max_factors, motion_only=False, enable_wq=enable_wq,
                           enable_update_uncer=enable_update_uncer, enable_udba=enable_udba,
@@ -102,7 +129,7 @@ class Backend:
         thresh = self.backend_loop_thresh   # 25
         t_start_loop = max(0, t_end - window)
 
-        graph = FactorGraph(self.video, self.update_op, device=self.device, corr_impl='alt', max_factors=max_factors)
+        graph = self._make_graph(max_factors)
         if local_graph is not None:
             copy_attr = ['ii', 'jj', 'age', 'net', 'target', 'weight']
             for key in copy_attr:
@@ -118,4 +145,3 @@ class Backend:
         del graph
         torch.cuda.empty_cache()
         return t_end - t_start_loop, n_edges
-

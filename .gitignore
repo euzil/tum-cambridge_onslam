@@ -9,5 +9,5 @@ bonn_balloon_baseline/
 datasets_train/
 bonn_crowd/
 .method_configs/
-Open-d4rt/
-AB_1
+AB_1/
+Open-d4rt

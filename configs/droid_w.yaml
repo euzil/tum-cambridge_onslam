@@ -101,6 +101,21 @@ tracking:
     nms: 1                 # r_local in GO-SLAM paper
     max_factors: 75        # maximum number of edges in local ba
     enable_opt_dyn_mask: True # whether to enable dynamic mask optimization
+  d4rt:
+    activate: False
+    mode: "offline"
+    cache_path: ""
+    cache_dir: "output/d4rt_cache"
+    allow_reprojection_fallback: False
+    target_coord_scale: "auto" # auto | full_to_tracking | normalized_to_tracking | none
+    binary_weight: 1.0
+    use_target: True
+    use_depth_init: False
+    use_depth_reg: False
+    use_pose_init: False
+    use_edge_selection: False
+    edge_min_valid_ratio: 0.05
+    depth_reg_lambda: 0.05
   backend:
     final_ba: True # whether to enable final global bundle adjustment in the end
     ba_freq: 20    # do online bundle adjustment every X keyframes

@@ -64,6 +64,8 @@ class DepthVideo:
         self.depth_shift = torch.zeros(buffer,device=self.device, dtype=torch.float).share_memory_()
         self.valid_depth_mask = torch.zeros(buffer, ht, wd, device=self.device, dtype=torch.bool).share_memory_()
         self.valid_depth_mask_small = torch.zeros(buffer, ht//self.down_scale, wd//self.down_scale, device=self.device, dtype=torch.bool).share_memory_()        
+        self.d4rt_depth_initialized = torch.zeros(buffer, device=self.device, dtype=torch.bool).share_memory_()
+        self.d4rt_pose_initialized = torch.zeros(buffer, device=self.device, dtype=torch.bool).share_memory_()
         ### feature attributes ###
         self.fmaps = torch.zeros(buffer, 1, 128, ht//self.down_scale, wd//self.down_scale, dtype=torch.half, device=self.device).share_memory_()
         self.nets = torch.zeros(buffer, 128, ht//self.down_scale, wd//self.down_scale, dtype=torch.half, device=self.device).share_memory_()

@@ -8,7 +8,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset
 from thirdparty.gaussian_splatting.utils.graphics_utils import focal2fov
-import AB_1.src.utils.colmap_read_model as read_model
+import src.utils.colmap_read_model as read_model
 from scipy.spatial.transform import Rotation
 
 def readEXR_onlydepth(filename):

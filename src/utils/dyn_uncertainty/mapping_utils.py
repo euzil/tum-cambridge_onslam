@@ -4,7 +4,7 @@ from math import exp
 import torch
 import torch.nn.functional as F
 from torch.autograd import Variable
-from AB_1.src.utils.dyn_uncertainty.median_filter import MedianPool2d
+from src.utils.dyn_uncertainty.median_filter import MedianPool2d
 
 
 def resample_tensor_to_shape(

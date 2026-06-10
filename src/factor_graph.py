@@ -205,6 +205,10 @@ class FactorGraph:
             # self.video.mono_disps_mask_up[ix] = self.video.mono_disps_mask_up[ix+1]
             self.video.valid_depth_mask[ix] = self.video.valid_depth_mask[ix+1]
             self.video.valid_depth_mask_small[ix] = self.video.valid_depth_mask_small[ix+1]
+            if hasattr(self.video, "d4rt_depth_initialized"):
+                self.video.d4rt_depth_initialized[ix] = self.video.d4rt_depth_initialized[ix+1]
+            if hasattr(self.video, "d4rt_pose_initialized"):
+                self.video.d4rt_pose_initialized[ix] = self.video.d4rt_pose_initialized[ix+1]
 
             self.video.nets[ix] = self.video.nets[ix+1]
             self.video.inps[ix] = self.video.inps[ix+1]

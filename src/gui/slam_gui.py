@@ -27,15 +27,15 @@ from OpenGL import GL as gl
 from thirdparty.gaussian_splatting.gaussian_renderer import render
 from thirdparty.gaussian_splatting.utils.graphics_utils import fov2focal, getWorld2View2
 from src.gui.gl_render import util, util_gau
-from AB_1.src.gui.gl_render.render_ogl import OpenGLRenderer
-from AB_1.src.gui.gui_utils import (
+from src.gui.gl_render.render_ogl import OpenGLRenderer
+from src.gui.gui_utils import (
     GaussianPacket,
     Packet_vis2main,
     create_frustum,
     cv_gl,
     get_latest_queue,
 )
-from AB_1.src.utils.camera_utils import Camera
+from src.utils.camera_utils import Camera
 
 _log_styles = {
     "MonoGS": "bold green",

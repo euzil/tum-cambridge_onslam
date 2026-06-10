@@ -1,6 +1,8 @@
 import torch
-from AB_1.src.factor_graph import FactorGraph
-from AB_1.src.backend import Backend as LoopClosing
+from src.factor_graph import FactorGraph
+from src.factor_graph_d4rt import D4RTFactorGraph
+from src.backend import Backend as LoopClosing
+from src.modules.d4rt_frontend import D4RTFrontend
 from torch.utils.tensorboard import SummaryWriter
 
 class Frontend:
@@ -35,13 +37,32 @@ class Frontend:
         self.loop_closing = LoopClosing(net, video, cfg)
 
         self.enable_opt_dyn_mask = cfg['tracking']['frontend']['enable_opt_dyn_mask']
+        self.use_d4rt = cfg['tracking'].get('d4rt', {}).get('activate', False)
+        self.d4rt_frontend = None
+        if self.use_d4rt:
+            self.enable_opt_dyn_mask = False
+            self.d4rt_frontend = D4RTFrontend(
+                cfg,
+                device=cfg['device'],
+                ht=video.ht,
+                wd=video.wd,
+                down_scale=video.down_scale,
+            )
 
-        self.graph = FactorGraph(
-            video, net.update,
-            device=cfg['device'],
-            corr_impl='volume',
-            max_factors=self.frontend_max_factors
-        )
+        if self.use_d4rt:
+            self.graph = D4RTFactorGraph(
+                video,
+                self.d4rt_frontend,
+                device=cfg['device'],
+                max_factors=self.frontend_max_factors,
+            )
+        else:
+            self.graph = FactorGraph(
+                video, net.update,
+                device=cfg['device'],
+                corr_impl='volume',
+                max_factors=self.frontend_max_factors
+            )
 
         ## This is to avoid too many consecutive candidate keyframes which:
         #  1. capture large moving objects (high optical flow)
@@ -57,7 +78,7 @@ class Frontend:
         """ add edges, perform update """
 
         self.t1 += 1
-        if self.graph.corr is not None:
+        if self.graph.corr is not None or self.use_d4rt:
             self.graph.rm_factors(self.graph.age > self.max_age, store=True)
 
         self.graph.add_proximity_factors(self.t1-5, max(self.t1-self.frontend_window, 0), 
@@ -223,4 +244,3 @@ class Frontend:
         elif self.is_initialized and self.t1 < self.video.counter.value:    # t1: num of keyframes already processed, self.video.counter.value: num of keyframes in the video
             self.__update(force_to_add_keyframe, event_writer)
             self.video.update_valid_depth_mask()
-

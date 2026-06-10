@@ -8,7 +8,7 @@ from typing import Dict, Tuple, Union
 from thirdparty.depth_anything_v2.metric_depth.depth_anything_v2.dpt import (
     DepthAnythingV2,
 )
-from AB_1.src.utils.sys_timer import timer
+from src.utils.sys_timer import timer
 
 
 def get_metric_depth_estimator(cfg: Dict) -> torch.nn.Module:

@@ -17,7 +17,7 @@ from thirdparty.gaussian_splatting.utils.graphics_utils import (
     focal2fov,
     getProjectionMatrix2,
 )
-from AB_1.src.utils.slam_utils import image_gradient, image_gradient_mask
+from src.utils.slam_utils import image_gradient, image_gradient_mask
 
 
 class Camera(nn.Module):

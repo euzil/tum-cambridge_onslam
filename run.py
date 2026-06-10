@@ -3,9 +3,9 @@ import torch
 import argparse
 import os
 
-from AB_1.src import config
-from AB_1.src.slam import SLAM
-from AB_1.src.utils.datasets import get_dataset
+from src import config
+from src.slam import SLAM
+from src.utils.datasets import get_dataset
 from time import gmtime, strftime
 from colorama import Fore,Style
 from torch.utils.tensorboard import SummaryWriter

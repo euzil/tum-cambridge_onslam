@@ -4,7 +4,7 @@ from torch import Tensor
 from torch.nn import Module
 import torch.nn.functional as F
 from thirdparty.gaussian_splatting.utils.loss_utils import ssim
-from AB_1.src.utils.dyn_uncertainty import mapping_utils as map_utils
+from src.utils.dyn_uncertainty import mapping_utils as map_utils
 
 
 def image_gradient(image):

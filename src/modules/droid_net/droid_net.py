@@ -17,7 +17,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch_scatter import scatter_mean
 
-from AB_1.src.modules.droid_net import ConvGRU, BasicEncoder, GradientClip
+from src.modules.droid_net import ConvGRU, BasicEncoder, GradientClip
 
 
 def cvx_upsample(data, mask):
