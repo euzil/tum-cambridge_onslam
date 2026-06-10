@@ -38,43 +38,6 @@ class FactorGraph:
 
         self.target_inac = torch.zeros([1, 0, ht, wd, 2], device=device, dtype=torch.float)
         self.weight_inac = torch.zeros([1, 0, ht, wd, 2], device=device, dtype=torch.float)
-        self._dynamic_ba_log_counter = 0
-
-    def _log_dynamic_ba_usage(self, ii, jj, weight, tag):
-        """Log how many BA edges can consume online dynamic motion priors."""
-        log_path = self.video.cfg.get("_dynamic_ba_edge_log_path", "")
-        if not log_path or not hasattr(self.video, "dynamic_motion_masks"):
-            return
-
-        with torch.no_grad():
-            ii_cpu = ii.detach().long().cpu()
-            jj_cpu = jj.detach().long().cpu()
-            forward = jj_cpu == ii_cpu + 1
-            forward_src = ii_cpu[forward]
-
-            mask_pixels = []
-            if forward_src.numel() > 0:
-                masks = self.video.dynamic_motion_masks
-                n_masks = int(masks.shape[0])
-                for src in forward_src.tolist():
-                    if 0 <= src < n_masks:
-                        mask_pixels.append(int((masks[src] > 0).sum().item()))
-                    else:
-                        mask_pixels.append(0)
-
-            n_adjacent_forward = int(forward.sum().item())
-            n_adjacent_with_mask = sum(1 for value in mask_pixels if value > 0)
-            total_mask_pixels = int(sum(mask_pixels))
-            mean_mask_pixels = total_mask_pixels / max(n_adjacent_forward, 1)
-            mean_edge_weight = float(weight.detach().mean().item()) if weight.numel() > 0 else 0.0
-
-        with open(log_path, "a", encoding="utf-8") as f:
-            f.write(
-                f"{self._dynamic_ba_log_counter},{tag},{int(ii_cpu.numel())},"
-                f"{n_adjacent_forward},{n_adjacent_with_mask},{total_mask_pixels},"
-                f"{mean_mask_pixels:.6f},{mean_edge_weight:.8f}\n"
-            )
-        self._dynamic_ba_log_counter += 1
 
     def __filter_repeated_edges(self, ii, jj):
         """ remove duplicate edges """
@@ -305,12 +268,9 @@ class FactorGraph:
             else:
                 ii, jj, target, weight = self.ii, self.jj, self.target, self.weight
 
-            target = self.video.apply_dynamic_motion_compensation(target, ii, jj)
-
             damping = .2 * self.damping[torch.unique(ii)].contiguous() + EP     # damping factor: avoid singlevalue tensor
 
             # bundle adjustment
-            self._log_dynamic_ba_usage(ii, jj, weight, "update")
             self.video.ba(target, weight, damping, ii, jj, t0, t1, 
                 iters=itrs, lm=1e-4, ep=0.1, lr=self.video.cfg['tracking']['uncertainty_params']['lr'], 
                 weight_decay=self.video.cfg['tracking']['uncertainty_params']['weight_decay'],
@@ -366,10 +326,8 @@ class FactorGraph:
 
             target = self.target
             weight = self.weight
-            target = self.video.apply_dynamic_motion_compensation(target, self.ii, self.jj)
 
             # dense bundle adjustment            
-            self._log_dynamic_ba_usage(self.ii, self.jj, weight, "update_lowmem")
             self.video.ba(target, weight, damping, self.ii, self.jj, t0, t1, 
                 iters=itrs, lm=1e-5, ep=1e-2, lr=self.video.cfg['tracking']['uncertainty_params']['gba_lr'],
                 weight_decay=self.video.cfg['tracking']['uncertainty_params']['gba_weight_decay'],

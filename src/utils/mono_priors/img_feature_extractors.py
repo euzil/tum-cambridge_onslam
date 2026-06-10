@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import transforms
-from src.utils.sys_timer import timer
+from AB_1.src.utils.sys_timer import timer
 
 """
 From FiT3D, here we subclass the model instead of overriding the "get_intermediate_layers" method

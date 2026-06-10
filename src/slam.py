@@ -1,4 +1,5 @@
 import os
+from AB_1.src.gui import gui_utils
 import torch
 import numpy as np
 import time
@@ -6,19 +7,21 @@ from collections import OrderedDict
 import torch.multiprocessing as mp
 from munch import munchify
 
-from src.modules.droid_net import DroidNet
-from src.depth_video import DepthVideo
-from src.trajectory_filler import PoseTrajectoryFiller
-from src.utils.common import setup_seed, update_cam
-from src.utils.Printer import Printer, FontColor
-from src.utils.eval_traj import kf_traj_eval, full_traj_eval, full_traj_fill
-from src.utils.datasets import BaseDataset
-from src.tracker import Tracker
-from src.mapper import Mapper
-from src.backend import Backend
-from src.utils.datasets import RGB_NoPose
+from AB_1.src.modules.droid_net import DroidNet
+from AB_1.src.depth_video import DepthVideo
+from AB_1.src.trajectory_filler import PoseTrajectoryFiller
+from AB_1.src.utils.common import setup_seed, update_cam
+from AB_1.src.utils.Printer import Printer, FontColor
+from AB_1.src.utils.eval_traj import kf_traj_eval, full_traj_eval, full_traj_fill
+from AB_1.src.utils.datasets import BaseDataset
+from AB_1.src.tracker import Tracker
+from AB_1.src.mapper import Mapper
+from AB_1.src.backend import Backend
+from AB_1.src.utils.datasets import RGB_NoPose
+from AB_1.src.gui import slam_gui
+from thirdparty.gaussian_splatting.scene.gaussian_model import GaussianModel
 from torch.utils.tensorboard import SummaryWriter
-from src.utils.sys_timer import timer
+from AB_1.src.utils.sys_timer import timer
 import ctypes
 
 class SLAM:
@@ -29,10 +32,6 @@ class SLAM:
         self.verbose: bool = cfg["verbose"]
         self.logger = None
         self.save_dir = cfg["data"]["output"] + "/" + cfg["scene"]
-        video_name = cfg.get("data", {}).get("video_name", "video.npz")
-        if not video_name.endswith(".npz"):
-            video_name = f"{video_name}.npz"
-        self.video_path = os.path.join(self.save_dir, video_name)
 
         os.makedirs(self.save_dir, exist_ok=True)
 
@@ -151,11 +150,11 @@ class SLAM:
             self.cfg["tracking"]["backend"]["final_ba"]
             and self.cfg["mapping"]["eval_before_final_ba"]
         ):
-            self.video.save_video(self.video_path)
+            self.video.save_video(f"{self.save_dir}/video.npz")
             if not isinstance(self.stream, RGB_NoPose):
                 try:
                     ate_statistics, global_scale, r_a, t_a = kf_traj_eval(
-                        self.video_path,
+                        f"{self.save_dir}/video.npz",
                         f"{self.save_dir}/traj/before_final_ba",
                         "kf_traj",
                         self.stream,
@@ -178,11 +177,11 @@ class SLAM:
         if self.cfg["tracking"]["backend"]["final_ba"]:
             self.backend()
 
-        self.video.save_video(self.video_path)
+        self.video.save_video(f"{self.save_dir}/video.npz")
         if not isinstance(self.stream, RGB_NoPose):
             try:
                 ate_statistics, global_scale, r_a, t_a = kf_traj_eval(
-                    self.video_path,
+                    f"{self.save_dir}/video.npz",
                     f"{self.save_dir}/traj",
                     "kf_traj",
                     self.stream,
@@ -230,42 +229,7 @@ class SLAM:
 
         self.printer.print("Metrics Evaluation Done!", FontColor.EVAL)
         timer._report_summary(self.save_dir)
-
-        # ---- 动态点预测（可选，通过 cfg['dynamic_prediction']['enable'] 控制）----
-        if self.cfg.get("dynamic_prediction", {}).get("enable", False):
-            self.run_dynamic_prediction()
-
         self.final_clean = True
-
-    def run_dynamic_prediction(self) -> None:
-        """
-        在 SLAM 完成后运行动态点运动预测。
-        需要 cfg['dynamic_prediction']['enable'] = True。
-        """
-        try:
-            from src.dynamic_bridge import DynamicBridge
-        except ImportError:
-            self.printer.print(
-                "dynamic_bridge 模块未找到，跳过动态预测。",
-                FontColor.INFO,
-            )
-            return
-
-        dp_cfg = self.cfg.get("dynamic_prediction", {})
-        video_npz = self.video_path
-
-        self.printer.print("Running dynamic point prediction ...", FontColor.INFO)
-        bridge = DynamicBridge(
-            cfg=self.cfg,
-            save_dir=self.save_dir,
-            window_size=dp_cfg.get("window_size", 8),
-            predict_steps=dp_cfg.get("predict_steps", 2),
-            uncer_thresh=dp_cfg.get("uncer_thresh", 0.8),
-            enable_vis=dp_cfg.get("enable_vis", False),
-            fps=dp_cfg.get("fps", 10.0),
-        )
-        bridge.run_from_video_npz(video_npz)
-        self.printer.print("Dynamic prediction done.", FontColor.INFO)
 
     def _eval_depth_all(self, ate_statistics, global_scale, r_a, t_a):
         """From Splat-SLAM. Not used in WildGS-SLAM evaluation, but might be useful in the future."""
@@ -274,7 +238,7 @@ class SLAM:
             "Evaluate sensor depth error with per frame alignment", FontColor.EVAL
         )
         depth_l1, depth_l1_max_4m, coverage = self.video.eval_depth_l1(
-            self.video_path, self.stream
+            f"{self.save_dir}/video.npz", self.stream
         )
         self.printer.print("Depth L1: " + str(depth_l1), FontColor.EVAL)
         self.printer.print("Depth L1 mask 4m: " + str(depth_l1_max_4m), FontColor.EVAL)
@@ -284,7 +248,7 @@ class SLAM:
             "Evaluate sensor depth error with global alignment", FontColor.EVAL
         )
         depth_l1_g, depth_l1_max_4m_g, _ = self.video.eval_depth_l1(
-            self.video_path, self.stream, global_scale
+            f"{self.save_dir}/video.npz", self.stream, global_scale
         )
         self.printer.print("Depth L1: " + str(depth_l1_g), FontColor.EVAL)
         self.printer.print(
@@ -335,9 +299,6 @@ class SLAM:
             p.start()
 
         if self.cfg['gui']:
-            from src.gui import gui_utils, slam_gui
-            from thirdparty.gaussian_splatting.scene.gaussian_model import GaussianModel
-
             time.sleep(5)
             pipeline_params = munchify(self.cfg["mapping"]["pipeline_params"])
             bg_color = [0, 0, 0]
@@ -359,7 +320,7 @@ class SLAM:
 
         # visualizer
         if self.cfg['droidvis']:
-            from src.utils.droid_visualization_rerun import droid_visualization_rerun
+            from AB_1.src.utils.droid_visualization_rerun import droid_visualization_rerun
             self.visualizer = mp.Process(
                 target=droid_visualization_rerun,
                 args=(self.video,),

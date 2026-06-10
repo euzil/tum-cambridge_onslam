@@ -12,7 +12,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from dynamic_prediction.d4rt_bridge import DROIDWBridge
+try:
+    from dynamic_prediction.d4rt_bridge import DROIDWBridge
+except ModuleNotFoundError:
+    DROIDWBridge = None
 
 
 def load_video(video_npz: Path) -> dict[str, np.ndarray]:
@@ -248,6 +251,11 @@ def export_dynamic_tracks(
     uncer_thresh: float,
     match_radius: float,
 ) -> dict[str, int]:
+    if DROIDWBridge is None:
+        raise ModuleNotFoundError(
+            "dynamic_prediction is required only when exporting dynamic tracks. "
+            "Run with --no-tracks, or make dynamic_prediction importable."
+        )
     bridge = DROIDWBridge(uncer_thresh=uncer_thresh, match_radius=match_radius)
     data = bridge.load(str(video_npz))
     frames, pids_list = bridge.extract_dynamic_points(data)

@@ -1,10 +1,10 @@
-from typing import Union, List, Tuple, Optional
+sfrom typing import Union, List, Tuple, Optional
 from math import exp
 
 import torch
 import torch.nn.functional as F
 from torch.autograd import Variable
-from src.utils.dyn_uncertainty.median_filter import MedianPool2d
+from AB_1.src.utils.dyn_uncertainty.median_filter import MedianPool2d
 
 
 def resample_tensor_to_shape(

@@ -11,17 +11,3 @@ tracking:
   frontend:
     window: 15
     max_factors: 50
-
-dynamic_prediction:
-  online_enable: True
-
-  # Keep enough dynamic candidates for 4D object modeling. The old pure
-  # uncertainty threshold often left only 4-19 predicted points per keyframe.
-  uncer_thresh: 0.8
-  min_dynamic_points: 300
-  max_dynamic_points: 800
-
-  max_feedback_points: 600
-  max_feedback_coverage: 0.12
-  splat_radius: 2
-  motion_comp_radius: 2

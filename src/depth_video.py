@@ -64,31 +64,6 @@ class DepthVideo:
         self.depth_shift = torch.zeros(buffer,device=self.device, dtype=torch.float).share_memory_()
         self.valid_depth_mask = torch.zeros(buffer, ht, wd, device=self.device, dtype=torch.bool).share_memory_()
         self.valid_depth_mask_small = torch.zeros(buffer, ht//self.down_scale, wd//self.down_scale, device=self.device, dtype=torch.bool).share_memory_()        
-        self.enable_dynamic_motion_comp = cfg.get("dynamic_prediction", {}).get("motion_comp_ba", False)
-        dp_cfg = cfg.get("dynamic_prediction", {})
-        self.dynamic_motion_prior_weight = dp_cfg.get("motion_comp_prior_weight", 0.1)
-        self.dynamic_motion_lr = dp_cfg.get("motion_comp_lr", 0.5)
-        self.dynamic_motion_damping = dp_cfg.get("motion_comp_damping", 1e-3)
-        self.dynamic_motion_flow = torch.zeros(
-            buffer, ht//self.down_scale, wd//self.down_scale, 2,
-            device=self.device, dtype=torch.float,
-        ).share_memory_()
-        self.dynamic_motion_weight = torch.zeros(
-            buffer, ht//self.down_scale, wd//self.down_scale,
-            device=self.device, dtype=torch.float,
-        ).share_memory_()
-        self.dynamic_motions = torch.zeros(
-            buffer, ht//self.down_scale, wd//self.down_scale, 3,
-            device=self.device, dtype=torch.float,
-        ).share_memory_()
-        self.dynamic_motion_priors = torch.zeros(
-            buffer, ht//self.down_scale, wd//self.down_scale, 3,
-            device=self.device, dtype=torch.float,
-        ).share_memory_()
-        self.dynamic_motion_masks = torch.zeros(
-            buffer, ht//self.down_scale, wd//self.down_scale,
-            device=self.device, dtype=torch.float,
-        ).share_memory_()
         ### feature attributes ###
         self.fmaps = torch.zeros(buffer, 1, 128, ht//self.down_scale, wd//self.down_scale, dtype=torch.half, device=self.device).share_memory_()
         self.nets = torch.zeros(buffer, 128, ht//self.down_scale, wd//self.down_scale, dtype=torch.half, device=self.device).share_memory_()
@@ -131,16 +106,6 @@ class DepthVideo:
 
     def get_lock(self):
         return self.counter.get_lock()
-
-    def apply_dynamic_motion_compensation(self, target, ii, jj):
-        """
-        Deprecated target-shift path.
-
-        Full motion-compensated BA now applies dynamic_motions inside the CUDA
-        projective transform and optimizes them in-kernel. Keep this function
-        as a no-op so old FactorGraph call sites do not double compensate.
-        """
-        return target
 
     def __item_setter(self, index, item):
         if isinstance(index, int) and index >= self.counter.value:
@@ -381,9 +346,6 @@ class DepthVideo:
                 assert not torch.isinf(self.affine_weights).any(), "self.affine_weights has inf value"
             if not self.metric_depth_reg:
                 droid_backends.ba(self.poses, self.disps, self.intrinsics[0], self.zeros,           # the shape of poses is determined by buffer size
-                    self.dynamic_motions,
-                    self.dynamic_motion_priors,
-                    self.dynamic_motion_masks,
                     target, weight, self.uncertainties, 
                     self.temp_y_cdot,
                     self.dino_feats_resize,
@@ -396,16 +358,9 @@ class DepthVideo:
                     motion_only, False, enable_update_uncer,
                     enable_udba, self.enable_affine_transform,
                     self.enable_bidirectional_uncer,
-                    self.enable_dynamic_motion_comp,
-                    self.dynamic_motion_prior_weight,
-                    self.dynamic_motion_lr,
-                    self.dynamic_motion_damping,
                     self.debug)         # poses: [buffer, 7], disps: [buffer, h, w], 
             else:
                 droid_backends.ba(self.poses, self.disps, self.intrinsics[0], self.mono_disps,
-                    self.dynamic_motions,
-                    self.dynamic_motion_priors,
-                    self.dynamic_motion_masks,
                     target, weight, self.uncertainties, 
                     self.temp_y_cdot,
                     self.dino_feats_resize,
@@ -418,10 +373,6 @@ class DepthVideo:
                     motion_only, False, enable_update_uncer,
                     enable_udba, self.enable_affine_transform,
                     self.enable_bidirectional_uncer,
-                    self.enable_dynamic_motion_comp,
-                    self.dynamic_motion_prior_weight,
-                    self.dynamic_motion_lr,
-                    self.dynamic_motion_damping,
                     self.debug)          # t0, t1: window of keyframes for BA
             
             self.disps.clamp_(min=1e-5)
@@ -859,9 +810,6 @@ class DepthVideo:
         droid_disps = self.disps[:self.counter.value].cpu().numpy()
         intrinsics = self.intrinsics[:self.counter.value].cpu().numpy()
         uncertainties = self.uncertainties[:self.counter.value].cpu().numpy()
-        dynamic_motions = self.dynamic_motions[:self.counter.value].cpu().numpy()
-        dynamic_motion_priors = self.dynamic_motion_priors[:self.counter.value].cpu().numpy()
-        dynamic_motion_masks = self.dynamic_motion_masks[:self.counter.value].cpu().numpy()
         np.savez(path,
             timestamps=timestamps,
             images=images,
@@ -870,10 +818,7 @@ class DepthVideo:
             droid_disps_up=droid_disps_up,
             droid_disps=droid_disps,
             intrinsics=intrinsics,
-            uncertainties=uncertainties,
-            dynamic_motions=dynamic_motions,
-            dynamic_motion_priors=dynamic_motion_priors,
-            dynamic_motion_masks=dynamic_motion_masks)
+            uncertainties=uncertainties)
         self.printer.print(f"Saved final depth video: {path}",FontColor.INFO)
 
     def save_poses(self,path:str):

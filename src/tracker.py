@@ -1,14 +1,14 @@
-from src.motion_filter import MotionFilter
-from src.frontend import Frontend 
-from src.backend import Backend
+from AB_1.src.motion_filter import MotionFilter
+from AB_1.src.frontend import Frontend 
+from AB_1.src.backend import Backend
 import torch
 from colorama import Fore, Style
 from multiprocessing.connection import Connection
-from src.utils.datasets import BaseDataset
-from src.utils.Printer import Printer,FontColor
-from src.utils.datasets import RGB_NoPose
-from src.utils.eval_traj import kf_traj_eval, full_traj_eval
-from src.utils.sys_timer import timer
+from AB_1.src.utils.datasets import BaseDataset
+from AB_1.src.utils.Printer import Printer,FontColor
+from AB_1.src.utils.datasets import RGB_NoPose
+from AB_1.src.utils.eval_traj import kf_traj_eval, full_traj_eval
+from AB_1.src.utils.sys_timer import timer
 import os
 from torch.utils.tensorboard import SummaryWriter
 
@@ -41,20 +41,6 @@ class Tracker:
         # write the config to the event writer
         self.event_writer.add_text("config", str(self.cfg))
 
-        # 在线动态预测器
-        self._online_dyn_pred = None
-        dp_cfg = self.cfg.get("dynamic_prediction", {})
-        if dp_cfg.get("enable", False) and dp_cfg.get("online_enable", True):
-            from src.dynamic_bridge import OnlineDynamicPredictor
-            self._online_dyn_pred = OnlineDynamicPredictor(
-                cfg=self.cfg,
-                save_dir=self.output,
-                dataset_dir=dp_cfg.get(
-                    "input_folder",
-                    self.cfg.get("data", {}).get("input_folder", ""),
-                ),
-            )
-
     def run(self, stream:BaseDataset):
         '''
         Trigger the tracking process.
@@ -79,9 +65,6 @@ class Tracker:
                 ### check there is enough motion
                 with timer.section("Tracking"):
                     force_to_add_keyframe = self.motion_filter.track(timestamp, image, intrinsic)   # only pre-compute dino features, ...
-                    if self._online_dyn_pred is not None and starting_count < self.video.counter.value:
-                        new_kf_idx = self.video.counter.value - 1
-                        self._online_dyn_pred.apply_pending_feedback(self.video, new_kf_idx)
                     # local bundle adjustment
                     self.frontend(force_to_add_keyframe, self.event_writer)
 
@@ -146,19 +129,6 @@ class Tracker:
                             else:
                                 self.online_ba.dense_ba(2, enable_update_uncer=False, enable_udba=self.frontend.enable_opt_dyn_mask)
                         prev_ba_idx = curr_kf_idx
-                        # Online BA 刚跑完，不确定性已更新 → 批量补齐所有新关键帧
-                        if self._online_dyn_pred is not None:
-                            start = self._online_dyn_pred._next_kf_to_update
-                            for kf in range(start, curr_kf_idx + 1):
-                                self._online_dyn_pred.update(self.video, kf)
-                            self._online_dyn_pred._next_kf_to_update = curr_kf_idx + 1
-                    else:
-                        # 未触发 Online BA：用当前 Local BA 结果补齐新关键帧
-                        if self._online_dyn_pred is not None:
-                            start = self._online_dyn_pred._next_kf_to_update
-                            for kf in range(start, curr_kf_idx + 1):
-                                self._online_dyn_pred.update(self.video, kf)
-                            self._online_dyn_pred._next_kf_to_update = curr_kf_idx + 1
                     # inform the mapper that the estimation of current pose and depth is finished
                     if self.cfg['mapping']['enable']:
                         self.pipe.send({"is_keyframe":True, "video_idx":curr_kf_idx,
@@ -173,6 +143,4 @@ class Tracker:
                         "timestamp":None, "just_initialized": False, 
                         "end":True})
 
-        # 合成在线预测 GIF
-        if self._online_dyn_pred is not None:
-            self._online_dyn_pred.finalize()
+                
