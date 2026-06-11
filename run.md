@@ -17,3 +17,28 @@ view_static_env_dynamic_timeline_matlab( ...
     4, ...
     'output/Bonn/bonn_person_tracking/4d_model_previous_motion/model_4d.mat', ...
     6);
+
+
+    conda activate d4rt
+
+python scripts_d4rt/build_d4rt_slam_cache.py \
+  --slam-config configs/Dynamic/TUM_RGBD/freiburg3_walking_xyz.yaml \
+  --opend4rt-root Open-d4rt \
+  --model-config Open-d4rt/checkpoints/OpenD4RT_48CLIP_9Mix_NoCropAUG/model.yaml \
+  --ckpt-path Open-d4rt/checkpoints/OpenD4RT_48CLIP_9Mix_NoCropAUG/opend4rt.ckpt \
+  --output output/d4rt_cache/freiburg3_walking_xyz_smoke16.npz \
+  --device cuda \
+  --max-frames 16 \
+  --query-chunk-size 1024 \
+  --source-batch-size 1
+
+python scripts_d4rt/build_d4rt_slam_cache.py \
+  --slam-config configs/Dynamic/TUM_RGBD/freiburg3_walking_xyz.yaml \
+  --opend4rt-root Open-d4rt \
+  --model-config Open-d4rt/checkpoints/OpenD4RT_32CLIP_9Dataset_NoAUG/model.yaml \
+  --ckpt-path Open-d4rt/checkpoints/OpenD4RT_32CLIP_9Dataset_NoAUG/opend4rt.ckpt \
+  --output output/d4rt_cache/freiburg3_walking_xyz_smoke16.npz \
+  --device cuda \
+  --max-frames 16 \
+  --query-chunk-size 1024 \
+  --source-batch-size 1

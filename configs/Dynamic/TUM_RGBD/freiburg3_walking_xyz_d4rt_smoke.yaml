@@ -1,0 +1,16 @@
+inherit_from: ./configs/Dynamic/TUM_RGBD/freiburg3_walking_xyz.yaml
+
+scene: freiburg3_walking_xyz_d4rt_smoke
+max_frames: 16
+
+tracking:
+  d4rt:
+    activate: true
+    mode: "offline"
+    cache_path: "output/d4rt_cache/freiburg3_walking_xyz_smoke16.npz"
+    target_coord_scale: "none"
+    use_target: true
+    use_depth_init: false
+    use_depth_reg: false
+    use_pose_init: false
+    use_edge_selection: false
