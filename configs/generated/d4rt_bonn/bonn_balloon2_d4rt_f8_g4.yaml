@@ -1,0 +1,22 @@
+inherit_from: ../../Dynamic/Bonn/bonn_balloon2.yaml
+
+scene: bonn_balloon2_d4rt_f8_g4
+max_frames: 8
+
+mapping:
+  eval_before_final_ba: false
+
+tracking:
+  warmup: 4
+  backend:
+    final_ba: false
+  d4rt:
+    activate: true
+    mode: "offline"
+    cache_path: "output/d4rt_cache/bonn_balloon2_f8_g4.npz"
+    target_coord_scale: "none"
+    use_target: true
+    use_depth_init: false
+    use_depth_reg: false
+    use_pose_init: false
+    use_edge_selection: false
